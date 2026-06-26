@@ -43,7 +43,7 @@ before downloading it from the web.
 ## Reproducing the analysis
 
 1. Clone this repository
-2. Create a `data/` folder in the project root (this folder is `.gitignore`d)
+2. Create a `data/` folder in the project root
 3. Download the datasets above into `data/`
 4. Open `clean_tfm.qmd` in RStudio
 5. Required R packages are listed at the top of the document
