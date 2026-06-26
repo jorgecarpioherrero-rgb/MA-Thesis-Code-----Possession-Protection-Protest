@@ -19,7 +19,7 @@ an interview-date-anchored strategy (robustness).
 
 This repository contains **only the analysis code**, provided as a single Quarto document (`clean_tfm.qmd`):
 
-  — full data cleaning
+  - full data cleaning
   - variable construction (Kwak weighting, CFA, exposure windows, anchoring strategies)
   - model estimation
   - and figure/table generation for all results reported in the thesis.
