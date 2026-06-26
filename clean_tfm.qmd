@@ -1,0 +1,4239 @@
+---
+ist=ls()---
+title: "clean_version_tfm"
+format: html
+editor: visual
+---
+
+# Packages
+
+```{r warning = FALSE, output = FALSE}
+library(tidyverse)
+library(stringr)
+library(skimr) 
+library(haven)
+library(lubridate)
+library(fuzzyjoin) 
+library(WDI)
+library(lme4)
+library(texreg)
+library(modelsummary)
+library(vdemdata)
+library(psych)
+library(purrr)
+
+setwd("/Users/rafaelcarpiobailen/Desktop/JORGE/TFM ORDENADO")
+```
+
+# Loading Data
+
+## VDEM
+
+```{r echo = FALSE}
+vdem_raw <- vdemdata::vdem 
+```
+
+## ACLED
+
+```{r warning = FALSE, echo = FALSE, output = FALSE}
+acled_raw <- read_delim("/Users/rafaelcarpiobailen/Desktop/JORGE/TFM ORDENADO/acled_raw.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+```
+
+## WVS
+
+```{r echo = FALSE, warning = FALSE, output = FALSE}
+wvs_raw <- read_csv(
+  "/Users/rafaelcarpiobailen/Desktop/JORGE/TFM ORDENADO/wvs_data.csv")
+```
+
+# Creating Variables
+
+## VDEM
+
+```{r echo = FALSE, warning = FALSE}
+vdem <- vdem_raw %>%
+  filter(year >= 1970) %>%
+  transmute(
+    country                       = country_name,
+    region                        = e_regiongeo,
+    year                          = year,
+    edi                           = v2x_polyarchy,
+    inflation                     = e_miinflat,
+    inflation_lagged              = lag(e_miinflat, 1),
+    cso_repression                = v2csreprss,
+    cso_female_participation      = v2csgender,
+    cso_anti_system               = v2csantimv,
+    media_censor_effort           = v2mecenefm,
+    internet_censor_effort        = v2mecenefi,
+    power_by_gender               = v2pepwrgen,
+    regimes_of_world              = v2x_regime,
+    exclusion_gender              = v2xpe_exlgender,
+    women_political_empowerment   = v2x_gender,
+    false_info_gov                = v2smpardom,
+    block_content_internet        = v2smgovfilprc,
+    internet_shut_down            = v2smgovshut,
+    social_media_shut_down        = v2smgovsm,
+    gdp_capita                    = e_gdppc,
+    gdp_capita_lagged             = lag(e_gdppc, 1),
+    gdp                           = e_gdp,
+    gdp_lagged                    = lag(e_gdp, 1),
+    population                    = e_pop
+  )
+```
+
+### VDEM name harmonisation
+
+```{r}
+vdem <- vdem %>%
+  mutate(country = case_match(
+    country,
+    "Türkiye"             ~ "Turkey",
+    "Palestine/West Bank" ~ "Palestine",
+    "Palestine/Gaza"      ~ "Palestine",
+    "Burma/Myanmar"      ~ "Myanmar",
+    .default = country
+  ))
+```
+
+## ACLED
+
+### Name harmonisation
+
+```{r}
+# Harmonise country names to match WVS
+acled <- acled_raw %>%
+  mutate(country = case_match(
+    country,
+    "United States"  ~ "United States of America",
+    "Czech Republic" ~ "Czechia",
+    .default = country
+  ))
+```
+
+### Event subsets
+
+```{r echo = FALSE}
+# Keyword pattern for women-targeted events
+women_keywords <- c(
+  "women", "woman", "female", "girls", "girl", "womens",
+  "women's", "women and girls", "female protesters",
+  "female protester", "women protesters", "women protester"
+)
+pattern <- str_c(women_keywords, collapse = "|")
+
+
+# ACLED coverage per country (used later to flag pre-monitoring obs)
+acled_coverage <- acled %>%
+  group_by(country) %>%
+  summarise(
+    acled_first_year = min(year(as.Date(event_date))),
+    acled_last_year  = max(year(as.Date(event_date))),
+    .groups = "drop"
+  )
+
+# Event subsets
+acled_gbv_state <- acled %>%
+  filter(
+    inter1 == 1, # it refers to violence perpetrated by the state
+    event_type == "Violence against civilians" |
+      sub_event_type %in% c("Arrests", 
+                            "Excessive force against protesters"),
+    str_detect(str_to_lower(assoc_actor_1), pattern)
+  )
+
+acled_only_gbv_state <- acled %>%
+  filter(
+    inter1 == 1,
+    sub_event_type %in% c("Sexual violence", 
+                          "Abduction/forced disappearance"),
+    str_detect(str_to_lower(assoc_actor_1), pattern)
+  )
+
+acled_non_gbv_violence <- acled %>%
+  filter(
+    inter1 == 1,
+    event_type == "Violence against civilians" |
+      sub_event_type %in% c("Arrests", 
+                            "Excessive force against protesters"),
+    !str_detect(str_to_lower(assoc_actor_1), pattern)
+  )
+
+acled_women_protests <- acled %>%
+  filter(
+    sub_event_type %in% c(
+      "Peaceful protest", "Protest with intervention",
+      "Violent demonstration", "Excessive force against protesters"
+    ),
+    str_detect(str_to_lower(assoc_actor_1), pattern)
+  )
+
+acled_non_fem_protests <- acled %>%
+  filter(
+    sub_event_type %in% c(
+      "Peaceful protest", "Protest with intervention",
+      "Violent demonstration", "Excessive force against protesters"
+    ),
+    !str_detect(str_to_lower(assoc_actor_1), pattern)
+  )
+```
+
+## WVS
+
+```{r warning = FALSE}
+wvs <- wvs_raw %>%
+
+  mutate(
+    COUNTRY_ALPHA = as.character(as_factor(COUNTRY_ALPHA)),
+
+    country = recode(
+      COUNTRY_ALPHA,
+      "ALB" = "Albania",          "AND" = "Andorra",
+      "ARG" = "Argentina",        "ARM" = "Armenia",
+      "AUS" = "Australia",        "AZE" = "Azerbaijan",
+      "BFA" = "Burkina Faso",     "BGD" = "Bangladesh",
+      "BGR" = "Bulgaria",         "BIH" = "Bosnia and Herzegovina",
+      "BLR" = "Belarus",          "BOL" = "Bolivia",
+      "BRA" = "Brazil",           "CAN" = "Canada",
+      "CHE" = "Switzerland",      "CHL" = "Chile",
+      "CHN" = "China",            "COL" = "Colombia",
+      "CYP" = "Cyprus",           "CZE" = "Czechia",
+      "DEU" = "Germany",          "DOM" = "Dominican Republic",
+      "DZA" = "Algeria",          "ECU" = "Ecuador",
+      "EGY" = "Egypt",            "ESP" = "Spain",
+      "EST" = "Estonia",          "ETH" = "Ethiopia",
+      "FIN" = "Finland",          "FRA" = "France",
+      "GBR" = "United Kingdom",   "GEO" = "Georgia",
+      "GHA" = "Ghana",            "GRC" = "Greece",
+      "GTM" = "Guatemala",        "HKG" = "Hong Kong",
+      "HRV" = "Croatia",          "HTI" = "Haiti",
+      "HUN" = "Hungary",          "IDN" = "Indonesia",
+      "IND" = "India",            "IRN" = "Iran",
+      "IRQ" = "Iraq",             "ISR" = "Israel",
+      "ITA" = "Italy",            "JOR" = "Jordan",
+      "JPN" = "Japan",            "KAZ" = "Kazakhstan",
+      "KEN" = "Kenya",            "KGZ" = "Kyrgyzstan",
+      "KOR" = "South Korea",      "KWT" = "Kuwait",
+      "LBN" = "Lebanon",          "LBY" = "Libya",
+      "LTU" = "Lithuania",        "LVA" = "Latvia",
+      "MAC" = "Macau SAR",        "MAR" = "Morocco",
+      "MDA" = "Moldova",          "MDV" = "Maldives",
+      "MEX" = "Mexico",           "MKD" = "North Macedonia",
+      "MLI" = "Mali",             "MMR" = "Myanmar",
+      "MNE" = "Montenegro",       "MNG" = "Mongolia",
+      "MYS" = "Malaysia",         "NGA" = "Nigeria",
+      "NIC" = "Nicaragua",        "NIR" = "Northern Ireland",
+      "NLD" = "Netherlands",      "NOR" = "Norway",
+      "NZL" = "New Zealand",      "PAK" = "Pakistan",
+      "PER" = "Peru",             "PHL" = "Philippines",
+      "POL" = "Poland",           "PRI" = "Puerto Rico",
+      "PSE" = "Palestine",        "QAT" = "Qatar",
+      "ROU" = "Romania",          "RUS" = "Russia",
+      "RWA" = "Rwanda",           "SAU" = "Saudi Arabia",
+      "SGP" = "Singapore",        "SLV" = "El Salvador",
+      "SRB" = "Serbia",           "SVK" = "Slovakia",
+      "SVN" = "Slovenia",         "SWE" = "Sweden",
+      "THA" = "Thailand",         "TJK" = "Tajikistan",
+      "TTO" = "Trinidad and Tobago", "TUN" = "Tunisia",
+      "TUR" = "Turkey",           "TWN" = "Taiwan",
+      "TZA" = "Tanzania",         "UGA" = "Uganda",
+      "UKR" = "Ukraine",          "URY" = "Uruguay",
+      "USA" = "United States of America", "UZB" = "Uzbekistan",
+      "VEN" = "Venezuela",        "VNM" = "Vietnam",
+      "YEM" = "Yemen",            "ZAF" = "South Africa",
+      "ZMB" = "Zambia",           "ZWE" = "Zimbabwe",
+      .default = NA_character_
+    ),
+
+    # --- Date variables ---
+    S012_clean = S012 %>%
+      na_if(-5) %>%
+      na_if(-4) %>%
+      na_if(-3) %>%
+      na_if(-2) %>%
+      na_if(-1),
+
+    S022 = as.character(S022),
+    S023 = as.character(S023),
+
+    # Fieldwork start: first day of start month
+    start_fw = if_else(
+      is.na(S022) | S022 == "-5",
+      as.Date(NA),
+      ymd(paste0(S022, "01"), quiet = TRUE)
+    ),
+
+    # Fieldwork end: last day of end month
+    end_fw = if_else(
+      is.na(S023) | S023 == "-5",
+      as.Date(NA),
+      ymd(paste0(S023, "01"), quiet = TRUE) %m+% months(1) - days(1)
+    ),
+
+    # Fieldwork midpoint — available for all obs with both start and end
+    midpoint_fw = if_else(
+      !is.na(start_fw) & !is.na(end_fw),
+      start_fw + as.integer((end_fw - start_fw) / 2),
+      as.Date(NA)
+    ),
+
+    # Exact interview date — NA when not recorded (no fallback)
+    date_interview = if_else(
+      !is.na(S012_clean),
+      ymd(as.character(S012_clean), quiet = TRUE),
+      as.Date(NA)
+    ),
+
+    # date_interview_end: exact date; falls back to end_fw
+    date_interview_end = if_else(
+      !is.na(S012_clean),
+      ymd(as.character(S012_clean), quiet = TRUE),
+      end_fw
+    ),
+
+    # date_interview_start: exact date; falls back to start_fw
+    date_interview_start = if_else(
+      !is.na(S012_clean),
+      ymd(as.character(S012_clean), quiet = TRUE),
+      start_fw
+    ),
+
+    # date_interview_midpoint: exact date; falls back to midpoint_fw
+    date_interview_midpoint = if_else(
+      !is.na(S012_clean),
+      ymd(as.character(S012_clean), quiet = TRUE),
+      midpoint_fw
+    ),
+
+    # Flag: TRUE only for respondents with an exact interview date
+    has_exact_date = !is.na(S012_clean),
+
+    # --- Egalitarianism Index ---
+    C001_clean = ifelse(C001 %in% c(1, 2, 3), C001, NA_real_),
+    C001_R = recode(C001_clean, `1` = 1, `2` = 3, `3` = 2,
+                    .default = NA_real_),
+
+    D059_clean = ifelse(D059 %in% c(1, 2, 3, 4), D059, NA_real_),
+    D059_R = recode(D059_clean, `1` = 1, `2` = 2, `3` = 3, `4` = 4),
+
+    C001_norm = (C001_R - 1) / 2,
+    D059_norm = (D059_R - 1) / 3,
+
+    # Clean individual-level variables for recoding
+    across(
+      .cols = c(X001, X003, X025R, X047_WVS, E023, E033,
+                E025, E026, E027, E028, X007, X028, S017, S018),
+      .fns  = ~ .x %>%
+        na_if(-5) %>% na_if(-4) %>% na_if(-3) %>% na_if(-2) %>% na_if(-1),
+      .names = "{.col}"
+    )
+  ) %>%
+
+  rowwise() %>%
+  mutate(
+    gender_norms_index_raw = mean(c(C001_norm, D059_norm), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+
+  filter(!is.na(gender_norms_index_raw)) %>%
+
+  transmute(
+    # identifiers
+    country             = country,
+    wave                = S002VS,
+    year                = S020,
+    respondent_id       = S007,
+
+    # date variables
+    start_fw                = start_fw,
+    end_fw                  = end_fw,
+    midpoint_fw             = midpoint_fw,
+    date_interview          = date_interview,          # exact only, NA otherwise
+    date_interview_end      = date_interview_end,      # exact; fallback: end_fw
+    date_interview_start    = date_interview_start,    # exact; fallback: start_fw
+    date_interview_midpoint = date_interview_midpoint, # exact; fallback: midpoint_fw
+    has_exact_date          = has_exact_date,
+
+    # egalitarianism
+    jobs_scarce              = C001_norm,
+    pol_leaders              = D059_norm,
+    gender_norms_index_raw   = gender_norms_index_raw,
+
+    # individual characteristics
+    female = case_when(X001 == 1 ~ 0, X001 == 2 ~ 1, TRUE ~ NA_real_),
+    age    = X003,
+
+    edu_recoded = recode(X025R,
+      `1` = "lower", `2` = "middle", `3` = "upper",
+      .default = NA_character_),
+
+    income           = X047_WVS,
+    interest_politics = recode(E023, `1` = 4, `2` = 3, `3` = 2, `4` = 1),
+    ideology         = E033,
+
+    employment_status = recode(X028,
+      `1` = "Full time",   `2` = "Part time",  `3` = "Self employed",
+      `4` = "Retired",     `5` = "Housewife",  `6` = "Students",
+      `7` = "Unemployed",  `8` = "Other",
+      .default = NA_character_),
+
+    employment_status_binary = recode(X028,
+      `1` = 1, `2` = 1, `3` = 1,
+      `4` = 0, `5` = 0, `6` = 0, `7` = 0, `8` = 0,
+      .default = NA_real_),
+
+    marital_status = recode(X007,
+      `1` = "married",                 `2` = "living together as married",
+      `3` = "divorced",                `4` = "separated",
+      `5` = "widowed",                 `6` = "single/never married",
+      .default = NA_character_),
+
+    marital_status_binary = recode(X007,
+      `1` = 1, `2` = 1,
+      `3` = 0, `4` = 0, `5` = 0, `6` = 0,
+      .default = NA_real_),
+
+    # dependent variable items
+    petition = case_when(E025 %in% c(1,2) ~ 1, E025 == 3 ~ 0, TRUE ~ NA_real_),
+    boycott  = case_when(E026 %in% c(1,2) ~ 1, E026 == 3 ~ 0, TRUE ~ NA_real_),
+    demonst  = case_when(E027 %in% c(1,2) ~ 1, E027 == 3 ~ 0, TRUE ~ NA_real_),
+    strike   = case_when(E028 %in% c(1,2) ~ 1, E028 == 3 ~ 0, TRUE ~ NA_real_),
+
+    petition_char = recode(E025,
+      `1` = "have done", `2` = "might do", `3` = "would not do",
+      .default = NA_character_),
+    boycott_char  = recode(E026,
+      `1` = "have done", `2` = "might do", `3` = "would not do",
+      .default = NA_character_),
+    demonst_char  = recode(E027,
+      `1` = "have done", `2` = "might do", `3` = "would not do",
+      .default = NA_character_),
+    strike_char   = recode(E028,
+      `1` = "have done", `2` = "might do", `3` = "would not do",
+      .default = NA_character_),
+
+    # interview privacy (S013B): 1=private, 0=others present, NA=-4/-5
+    interview_privacy = case_when(
+      S013B == 1 ~ 1,
+      S013B == 2 ~ 0,
+      TRUE       ~ NA_real_
+    ),
+
+    # weights
+    weight               = S017,
+    equilibrated_weight  = S018
+  ) %>%
+
+  # macro egalitarianism (country-year mean)
+  group_by(country, year) %>%
+  mutate(gender_norms_macro = mean(gender_norms_index_raw, na.rm = TRUE)) %>%
+  ungroup() %>%
+
+  # row id for joining back after exposure calculation
+  mutate(row_id = row_number())
+
+### Quick date coverage check
+date_check <- wvs %>%
+  summarise(
+    total_obs        = n(),
+    exact_date       = sum(has_exact_date),
+    has_end_fw       = sum(!has_exact_date & !is.na(end_fw)),
+    has_start_fw     = sum(!has_exact_date & !is.na(start_fw)),
+    has_midpoint_fw  = sum(!has_exact_date & !is.na(midpoint_fw)),
+    missing_all      = sum(is.na(date_interview_end)),
+    pct_exact        = round(mean(has_exact_date) * 100, 1)
+  )
+print(date_check)
+
+### Interview Privacy (S013B) coverage check
+cat("=== S013B overall distribution ===\n")
+print(table(wvs$interview_privacy, useNA = "always"))
+
+cat("\n=== Coverage by country-year ===\n")
+wvs %>%
+  group_by(country, year) %>%
+  summarise(
+    n_total     = n(),
+    n_valid     = sum(!is.na(interview_privacy)),
+    pct_valid   = round(100 * n_valid / n_total, 1),
+    n_not_asked = sum(is.na(interview_privacy)),
+    .groups     = "drop"
+  ) %>%
+  arrange(pct_valid) %>%
+  print(n = Inf)
+```
+
+### Checking Egalitarianism Index Components
+
+```{r}
+# Overall bivariate correlation between the two items
+cor(wvs$jobs_scarce, wvs$pol_leaders, use = "complete.obs")
+
+# Internal consistency
+items   <- wvs %>% select(jobs_scarce, pol_leaders)
+alpha_res <- psych::alpha(items)
+alpha_res$total
+
+# Countries where items move in opposite directions
+wvs %>%
+  group_by(country) %>%
+  summarize(corr = cor(jobs_scarce, pol_leaders, 
+                       use = "complete.obs")) %>%
+  filter(corr < 0)
+```
+
+# Creating Exposure
+
+## Function
+
+```{r}
+
+# One function handles every date reference type and 3 rolling windows.
+# Returns a data frame with row_id + 3 new columns per call.
+
+# Windows: roll180, roll365, roll730 — rolling N days back from ref_date.
+
+# Date suffix naming convention:
+#   exact   — individual exact interview date (has_exact_date == TRUE only)
+#   fwmid   — fieldwork midpoint anchor, primary strategy (same for all in CY)
+#   fwstart — fieldwork start anchor, robustness alternative
+
+calculate_exposure <- function(wvs_df, acled_df, prefix,
+                               date_col, exact_only = FALSE) {
+
+  if (exact_only) wvs_df <- filter(wvs_df, has_exact_date)
+
+  wvs_df <- wvs_df %>%
+    filter(!is.na(.data[[date_col]])) %>%
+    mutate(ref_date = .data[[date_col]])
+
+  common_countries <- intersect(unique(wvs_df$country), unique(acled_df$country))
+
+  map_df(common_countries, function(ctry) {
+
+    w_sub <- wvs_df %>%
+      filter(country == ctry) %>%
+      select(row_id, country, ref_date) %>%
+      mutate(
+        start_180 = ref_date - days(180),
+        start_365 = ref_date - days(365),
+        start_730 = ref_date - days(730)
+      )
+
+    a_sub <- acled_df %>%
+      filter(country == ctry) %>%
+      mutate(event_date = as.Date(event_date)) %>%
+      count(country, event_date, name = "n_events")
+
+    if (nrow(a_sub) == 0) return(NULL)
+
+    w_sub %>%
+      inner_join(a_sub, by = "country", relationship = "many-to-many") %>%
+      group_by(row_id) %>%
+      summarise(
+        !!paste0(prefix, "_roll180") := sum(n_events[event_date >= start_180 & event_date <= ref_date], na.rm = TRUE),
+        !!paste0(prefix, "_roll365") := sum(n_events[event_date >= start_365 & event_date <= ref_date], na.rm = TRUE),
+        !!paste0(prefix, "_roll730") := sum(n_events[event_date >= start_730 & event_date <= ref_date], na.rm = TRUE),
+        .groups = "drop"
+      )
+  })
+}
+```
+
+## Configuration
+
+```{r}
+# Five ACLED event type subsets
+acled_subsets <- list(
+  gbv_st     = acled_gbv_state,
+  gbv_strict = acled_only_gbv_state,
+  non_gbv_st = acled_non_gbv_violence,
+  w_prot     = acled_women_protests,
+  gen_prot   = acled_non_fem_protests
+)
+
+# Three date reference configurations (end/start/mid dropped — unused in analysis)
+date_configs <- list(
+  list(col = "date_interview", suffix = "exact",   exact_only = TRUE),
+  list(col = "start_fw",       suffix = "fwstart", exact_only = FALSE),
+  list(col = "midpoint_fw",    suffix = "fwmid",   exact_only = FALSE)
+)
+```
+
+## Run (15 combinations: 3 date types × 5 event types)
+
+```{r}
+all_exposure_results <- list()
+
+for (dc in date_configs) {
+  for (ev_name in names(acled_subsets)) {
+
+    key <- paste0(ev_name, "_", dc$suffix)
+    cat("Computing:", key, "\n")
+
+    all_exposure_results[[key]] <- calculate_exposure(
+      wvs_df     = wvs,
+      acled_df   = acled_subsets[[ev_name]],
+      prefix     = key,
+      date_col   = dc$col,
+      exact_only = dc$exact_only
+    )
+  }
+}
+
+# Join all 15 result tables back to wvs in one step
+wvs_exposure <- reduce(
+  all_exposure_results,
+  ~ left_join(.x, .y, by = "row_id"),
+  .init = wvs
+)
+```
+
+## ACLED Monitoring Window Correction
+
+```{r}
+# Converts join-NAs to 0 when ACLED was actively monitoring but saw no events.
+# Keeps NA when the reference date falls outside the monitoring window.
+# Each date type uses its own reference year for the check.
+
+correct_acled_coverage <- function(df, ref_year_col, ref_month_col, var_pattern) {
+  ry <- df[[ref_year_col]]
+  rm <- df[[ref_month_col]]
+  # Window-start year approximation (calendar-year level):
+  #   roll730 → always subtract 2 years
+  #   roll365 → always subtract 1 year (365-day window always touches prior year)
+  #   roll180 → month-aware: midpoint in Jan-Jun crosses into prior year (-1);
+  # midpoint in Jul-Dec stays within current year (-0).
+  # Threshold: 180 days before Jul 1 = Jan 1, so month >= 7 is safe.
+  window_back_years <- function(col_name, ref_months) {
+    if (grepl("roll730", col_name)) return(2L)
+    if (grepl("roll365",         col_name)) return(1L)
+    if (grepl("roll180",         col_name)) return(if_else(ref_months >= 7L, 0L, 1L))
+    return(0L)
+  }
+  df %>%
+    mutate(across(
+      .cols = matches(var_pattern),
+      .fns  = function(x) {
+        wsy <- ry - window_back_years(cur_column(), rm)
+        case_when(
+          is.na(.data$acled_first_year)                                 ~ NA_real_,
+          wsy < .data$acled_first_year                                  ~ NA_real_,
+          !is.na(.data$acled_last_year) & ry > .data$acled_last_year   ~ NA_real_,
+          is.na(x)                                                      ~ 0,
+          TRUE                                                          ~ as.numeric(x)
+        )
+      }
+    ))
+}
+
+wvs_exposure <- wvs_exposure %>%
+  left_join(acled_coverage, by = "country") %>%
+  mutate(
+    ry_exact   = if_else(!is.na(date_interview),
+                         as.integer(year(date_interview)),  NA_integer_),
+    rm_exact   = if_else(!is.na(date_interview),
+                         as.integer(month(date_interview)), NA_integer_),
+    ry_fwstart = if_else(!is.na(start_fw),
+                         as.integer(year(start_fw)),        NA_integer_),
+    rm_fwstart = if_else(!is.na(start_fw),
+                         as.integer(month(start_fw)),       NA_integer_),
+    ry_fwmid   = if_else(!is.na(midpoint_fw),
+                         as.integer(year(midpoint_fw)),     NA_integer_),
+    rm_fwmid   = if_else(!is.na(midpoint_fw),
+                         as.integer(month(midpoint_fw)),    NA_integer_)
+  ) %>%
+  correct_acled_coverage("ry_exact",   "rm_exact",   "_exact_(roll|ytd)")   %>%
+  correct_acled_coverage("ry_fwstart", "rm_fwstart", "_fwstart_(roll|ytd)") %>%
+  correct_acled_coverage("ry_fwmid",   "rm_fwmid",   "_fwmid_(roll|ytd)")   %>%
+  select(-acled_first_year, -acled_last_year,
+         -starts_with("ry_"), -starts_with("rm_"))
+
+# Remove Canada (incomplete ACLED coverage for this sample)
+wvs_exposure <- filter(wvs_exposure, country != "Canada")
+```
+
+
+
+## Save Checkpoint
+
+```{r}
+saveRDS(wvs_exposure, "wvs_exposure_clean.rds")
+wvs_exposure <- readRDS("wvs_exposure_clean.rds")
+```
+
+# Join VDEM and Exclude Puerto Rico
+
+```{r}
+joint_data <- wvs_exposure %>%
+  left_join(vdem, by = c("country", "year")) %>%
+  filter(country != "Puerto Rico")
+
+saveRDS(joint_data, "joint_data_clean.rds")
+joint_data <- readRDS("joint_data_clean.rds")
+```
+
+# Joining Economic Data
+
+## Download and Clean World Bank
+
+```{r}
+# Indicators:
+# NY.GDP.PCAP.PP.KD = GDP per capita, PPP (constant 2017 international $)
+# NY.GDP.MKTP.KD    = GDP (constant 2015 US$)
+# NY.GDP.MKTP.KD.ZG = GDP growth (annual %)
+# SL.UEM.TOTL.ZS    = Unemployment, total (% of total labor force)
+# FP.CPI.TOTL.ZG    = Inflation, consumer prices (annual %)
+
+wb_raw <- WDI(
+  indicator = c(
+    "wb_gdp_pcap"  = "NY.GDP.PCAP.PP.KD",
+    "wb_gdp_total" = "NY.GDP.MKTP.KD",
+    "wb_growth"    = "NY.GDP.MKTP.KD.ZG",
+    "wb_unemp"     = "SL.UEM.TOTL.ZS",
+    "wb_infl"      = "FP.CPI.TOTL.ZG"
+  ),
+  start = 1990,
+  end   = 2024,
+  extra = TRUE
+)
+
+wb_clean <- wb_raw %>%
+  filter(region != "Aggregates") %>%
+  mutate(
+    country = recode(country,
+      "Egypt, Arab Rep."     = "Egypt",
+      "Hong Kong SAR, China" = "Hong Kong",
+      "Iran, Islamic Rep."   = "Iran",
+      "Korea, Rep."          = "South Korea",
+      "Kyrgyz Republic"      = "Kyrgyzstan",
+      "Macao SAR, China"     = "Macau SAR",
+      "Puerto Rico (US)"     = "Puerto Rico",
+      "Russian Federation"   = "Russia",
+      "Slovak Republic"      = "Slovakia",
+      "Turkiye"              = "Turkey",
+      "United States"        = "United States of America",
+      "Venezuela, RB"        = "Venezuela",
+      "Viet Nam"             = "Vietnam",
+      "Yemen, Rep."          = "Yemen",
+      "West Bank and Gaza"   = "Palestine"
+    ),
+    country = trimws(as.character(country)),
+    year    = as.numeric(year)
+  ) %>%
+  select(country, year, wb_gdp_pcap, wb_gdp_total, wb_growth, wb_unemp, wb_infl)
+```
+
+## Normal Variables
+
+```{r}
+joint_data <- joint_data %>%
+  mutate(country = trimws(as.character(country)), year = as.numeric(year)) %>%
+  left_join(wb_clean, by = c("country", "year")) %>%
+  group_by(country) %>%
+  mutate(
+    # --- A. GDP PER CAPITA (Ratio Scaling) ---
+    gdp_wb_thousands  = wb_gdp_pcap / 1000,
+    ratio             = mean(gdp_capita / gdp_wb_thousands, na.rm = TRUE),
+    ratio             = ifelse(is.nan(ratio), 1, ratio),
+    gdp_wb_scaled     = gdp_wb_thousands * ratio,
+    gdp_capita_final  = ifelse(is.na(gdp_capita), gdp_wb_scaled, gdp_capita),
+    is_wb_gdp_capita  = ifelse(is.na(gdp_capita) & !is.na(wb_gdp_pcap), 1, 0),
+
+    # --- B. TOTAL GDP (Ratio Scaling) ---
+    ratio_total     = mean(gdp / wb_gdp_total, na.rm = TRUE),
+    ratio_total     = ifelse(is.nan(ratio_total) | is.infinite(ratio_total), 1, ratio_total),
+    gdp_total_final = ifelse(is.na(gdp), wb_gdp_total * ratio_total, gdp),
+    is_wb_gdp_total = ifelse(is.na(gdp) & !is.na(wb_gdp_total), 1, 0),
+
+    # --- C. RATES & PERCENTAGES (Direct Patch) ---
+    inflation_final    = ifelse(is.na(inflation), wb_infl, inflation),
+    is_wb_infl         = ifelse(is.na(inflation) & !is.na(wb_infl), 1, 0),
+    gdp_growth         = wb_growth,
+    unemployment_final = wb_unemp,
+
+    # --- D. MISERY INDEX ---
+    misery_index = inflation_final + unemployment_final
+  ) %>%
+  ungroup()
+
+# Harmonisation checks
+cor(joint_data$gdp_capita,   joint_data$gdp_wb_scaled,   use = "complete.obs")
+cor(joint_data$gdp,          joint_data$gdp_total_final, use = "complete.obs")
+
+ggplot(joint_data, aes(x = gdp_capita, y = gdp_wb_scaled)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(title = "Harmonisation Check: V-Dem vs. Scaled WB GDP per capita",
+       x = "Original V-Dem", y = "Scaled World Bank") +
+  theme_minimal()
+```
+
+## Lag Variables
+
+```{r}
+wb_lagged <- wb_raw %>%
+  filter(region != "Aggregates") %>%
+  mutate(
+    country = recode(country,
+      "Egypt, Arab Rep."     = "Egypt",
+      "Hong Kong SAR, China" = "Hong Kong",
+      "Iran, Islamic Rep."   = "Iran",
+      "Korea, Rep."          = "South Korea",
+      "Kyrgyz Republic"      = "Kyrgyzstan",
+      "Macao SAR, China"     = "Macau SAR",
+      "Puerto Rico (US)"     = "Puerto Rico",
+      "Russian Federation"   = "Russia",
+      "Slovak Republic"      = "Slovakia",
+      "Turkiye"              = "Turkey",
+      "United States"        = "United States of America",
+      "Venezuela, RB"        = "Venezuela",
+      "Viet Nam"             = "Vietnam",
+      "Yemen, Rep."          = "Yemen",
+      "West Bank and Gaza"   = "Palestine"
+    ),
+    country = trimws(as.character(country)),
+    year    = as.numeric(year)
+  ) %>%
+  group_by(country) %>%
+  arrange(year) %>%
+  mutate(
+    wb_gdp_pcap_lag  = lag(wb_gdp_pcap, 1),
+    wb_gdp_total_lag = lag(wb_gdp_total, 1),
+    wb_infl_lag      = lag(wb_infl, 1),
+    wb_growth_lag    = lag(wb_growth, 1),
+    wb_unemp_lag     = lag(wb_unemp, 1)
+  ) %>%
+  select(country, year, contains("_lag")) %>%
+  ungroup()
+
+joint_data <- joint_data %>%
+  left_join(wb_lagged, by = c("country", "year")) %>%
+  group_by(country) %>%
+  mutate(
+    # --- A. LAGGED GDP PER CAPITA ---
+    gdp_wb_lag_k         = wb_gdp_pcap_lag / 1000,
+    ratio_lag            = mean(gdp_capita_lagged / gdp_wb_lag_k, na.rm = TRUE),
+    ratio_lag            = ifelse(is.nan(ratio_lag) | is.infinite(ratio_lag), 1, ratio_lag),
+    gdp_wb_lag_scaled    = gdp_wb_lag_k * ratio_lag,
+    gdp_capita_lag_final = ifelse(is.na(gdp_capita_lagged), gdp_wb_lag_scaled, gdp_capita_lagged),
+
+    # --- B. LAGGED RATES ---
+    infl_lag_final   = ifelse(is.na(inflation_lagged), wb_infl_lag, inflation_lagged),
+    unemp_lag_final  = wb_unemp_lag,
+    growth_lag_final = wb_growth_lag,
+
+    # --- C. LAGGED MISERY INDEX ---
+    misery_index_lag = infl_lag_final + unemp_lag_final
+  ) %>%
+  ungroup()
+
+# Harmonisation checks
+cor(joint_data$gdp_capita_lagged, joint_data$gdp_wb_lag_scaled, use = "complete.obs")
+cor(joint_data$gdp,               joint_data$gdp_total_final,   use = "complete.obs")
+```
+
+## Manual Imputation of Missing Values
+
+```{r}
+# Sources: IMF World Economic Outlook / World Bank where noted
+
+joint_data <- joint_data %>%
+  mutate(
+    # --- INFLATION ---
+    inflation_final = case_when(
+      country == "Taiwan"        & year == 2019 ~ 0.6,
+      country == "Myanmar" & year == 2020 ~ 2.2,  # IMF
+      country == "Tajikistan"    & year == 2020 ~ 8.6,  # IMF
+      country == "Venezuela"     & year == 2021 ~ 1590, # IMF
+      TRUE ~ inflation_final
+    ),
+
+    infl_lag_final = case_when(
+      country == "Taiwan"     & year == 2019 ~ 1.4,
+      country == "Tajikistan" & year == 2020 ~ 7.8,    # IMF
+      country == "Venezuela"  & year == 2021 ~ 2360,
+      TRUE ~ infl_lag_final
+    ),
+
+    # --- UNEMPLOYMENT ---
+    unemployment_final = case_when(
+      country == "Taiwan" & year == 2019 ~ 3.7,         # IMF
+      TRUE ~ unemployment_final
+    ),
+
+    unemp_lag_final = case_when(
+      country == "Taiwan" & year == 2019 ~ 3.7,         # IMF
+      TRUE ~ unemp_lag_final
+    ),
+
+    # --- GDP PER CAPITA ---
+    # NOTE: gdp_capita_final / gdp_capita_lag_final are in THOUSANDS of USD
+    # (consistent with VDEM e_gdppc and the /1000 applied to WB data at line 713).
+    # Venezuela values sourced from IMF WEO; raw-dollar figures divided by 1000.
+    gdp_capita_final = case_when(
+      country == "Venezuela" & year == 2021 ~ 2.090,    # IMF WEO NGDPDPC 2021 / 1000
+      TRUE ~ gdp_capita_final
+    ),
+
+    gdp_capita_lag_final = case_when(
+      country == "Venezuela" & year == 2021 ~ 1.567,    # IMF WEO NGDPDPC 2020 / 1000
+      TRUE ~ gdp_capita_lag_final
+    ),
+
+    # --- GROWTH ---
+    gdp_growth = case_when(
+      country == "Taiwan" & year == 2019 ~ 3.1,
+      TRUE ~ gdp_growth
+    ),
+
+    growth_lag_final = case_when(
+      country == "Taiwan" & year == 2019 ~ 2.9,
+      TRUE ~ growth_lag_final
+    )
+  ) %>%
+  mutate(
+    misery_index     = inflation_final + unemployment_final,
+    misery_index_lag = infl_lag_final  + unemp_lag_final
+  )
+```
+
+## Save Checkpoint
+
+```{r}
+saveRDS(joint_data, "joint_data_final_clean.rds")
+joint_data <- readRDS("joint_data_final_clean.rds")
+```
+
+# Skewness Check (Pre-Transformation)
+
+```{r}
+library(moments)
+
+vars_skew <- c(
+  # Economic
+  "gdp_capita_final", "gdp_capita_lag_final",
+  "inflation_final",  "infl_lag_final",
+  "unemployment_final", "unemp_lag_final",
+  "misery_index",     "misery_index_lag",
+  "gdp_growth",       "growth_lag_final",
+  # VDEM
+  "edi", "gender_norms_macro", "women_political_empowerment",
+  # Representative Gend Rep ratios (one per window)
+  "gbv_st_exact_roll180",    "non_gbv_st_exact_roll180",
+  "gbv_st_fwstart_roll180",  "non_gbv_st_fwstart_roll180",
+  "gbv_st_fwmid_roll180",    "non_gbv_st_fwmid_roll180",
+  # Representative protest counts
+  "gen_prot_fwstart_roll180", "gen_prot_fwmid_roll180"
+)
+
+skew_report <- data.frame(
+  Variable = vars_skew,
+  Skewness = sapply(joint_data[vars_skew],
+                    function(x) round(skewness(x, na.rm = TRUE), 3))
+)
+print(skew_report)
+```
+
+# Ratios
+
+```{r}
+# Gend Rep ratio: share of state violence that is women-targeted
+# Formula: gbv_st / (gbv_st + non_gbv_st + 1)
+# The +1 Laplace smoothing avoids division by zero in low-event country-years.
+# Computed for all date-type x window combinations.
+
+date_suffixes   <- c("exact", "fwstart", "fwmid")
+window_suffixes <- c("roll180", "roll365", "roll730")
+
+for (ds in date_suffixes) {
+  for (ws in window_suffixes) {
+    gbv_col   <- paste0("gbv_st_",    ds, "_", ws)
+    nonbgv_col <- paste0("non_gbv_st_", ds, "_", ws)
+    ratio_col  <- paste0("gbv_ratio_",  ds, "_", ws)
+
+    joint_data <- joint_data %>%
+      mutate(!!ratio_col :=
+               .data[[gbv_col]] / (.data[[gbv_col]] + .data[[nonbgv_col]] + 1))
+  }
+}
+```
+
+# Log Transformations and Standardisation
+
+```{r}
+joint_data <- joint_data %>%
+  mutate(
+
+    # --- A. ECONOMIC VARIABLES ---
+    # Inflation: winsorise at 99th pct then floor at 0 before log1p
+    infl_capped         = pmin(inflation_final,
+                               quantile(inflation_final, 0.99, na.rm = TRUE)),
+    log_inflation       = log1p(pmax(0, infl_capped)),
+
+    infl_lag_capped     = pmin(infl_lag_final,
+                               quantile(infl_lag_final, 0.99, na.rm = TRUE)),
+    log_inflation_lag   = log1p(pmax(0, infl_lag_capped)),
+
+    # Misery index
+    log_misery          = log1p(pmax(0, misery_index)),
+    log_misery_lag      = log1p(pmax(0, misery_index_lag)),
+
+    # GDP per capita
+    log_gdp_capita      = log(pmax(1, gdp_capita_final)),
+    log_gdp_capita_lag  = log(pmax(1, gdp_capita_lag_final)),
+    log_gdp_total       = log(pmax(1, gdp_total_final)),
+
+    # Unemployment
+    log_unemp           = log1p(pmax(0, unemployment_final)),
+    log_unemp_lag       = log1p(pmax(0, unemp_lag_final)),
+
+    # Growth: can be negative — winsorise only, no log
+    gdp_growth_capped   = pmin(pmax(gdp_growth,
+                                    quantile(gdp_growth, 0.01, na.rm = TRUE)),
+                               quantile(gdp_growth, 0.99, na.rm = TRUE)),
+    growth_lag_capped   = pmin(pmax(growth_lag_final,
+                                    quantile(growth_lag_final, 0.01, na.rm = TRUE)),
+                               quantile(growth_lag_final, 0.99, na.rm = TRUE)),
+
+    # --- B. VIOLENCE AND PROTEST COUNTS ---
+    # Log-transform all non_gbv_st and gen_prot count variables
+    across(
+      matches("^non_gbv_st_(exact|fwstart|fwmid)_"),
+      ~ log1p(pmax(0, .)),
+      .names = "log_{.col}"
+    ),
+    across(
+      matches("^gen_prot_(exact|fwstart|fwmid)_"),
+      ~ log1p(pmax(0, .)),
+      .names = "log_{.col}"
+    ),
+
+    # --- C. STANDARDISATION (Z-SCORES) ---
+    # Gend Rep ratios: standardise only, no log
+    across(
+      matches("^gbv_ratio_(exact|fwstart|fwmid)_"),
+      ~ as.numeric(scale(.)),
+      .names = "{.col}_z"
+    ),
+
+    # Log-transformed economic variables
+    across(
+      c(log_inflation, log_inflation_lag,
+        log_misery, log_misery_lag,
+        log_gdp_capita, log_gdp_capita_lag, log_gdp_total,
+        log_unemp, log_unemp_lag),
+      ~ as.numeric(scale(.)),
+      .names = "{.col}_z"
+    ),
+
+    # Winsorised growth (no log)
+    gdp_growth_z    = as.numeric(scale(gdp_growth_capped)),
+    growth_lag_z    = as.numeric(scale(growth_lag_capped)),
+
+    # Log violence and protest counts
+    across(
+      matches("^log_non_gbv_st_(exact|fwstart|fwmid)_"),
+      ~ as.numeric(scale(.)),
+      .names = "{.col}_z"
+    ),
+    across(
+      matches("^log_gen_prot_(exact|fwstart|fwmid)_"),
+      ~ as.numeric(scale(.)),
+      .names = "{.col}_z"
+    ),
+
+    # VDEM and norms
+    gender_norms_z    = as.numeric(scale(gender_norms_macro)),
+    cso_repression_z  = as.numeric(scale(cso_repression)),
+    edi_z             = as.numeric(scale(edi)),
+    wpe_z             = as.numeric(scale(women_political_empowerment))
+  )
+```
+
+## Skewness Verification (Post-Transformation)
+
+```{r}
+vars_check <- c(
+  "log_inflation", "log_misery", "log_misery_lag",
+  "log_gdp_capita", "log_gdp_capita_lag",
+  "log_non_gbv_st_fwstart_roll180", "log_gen_prot_fwstart_roll180",
+  "log_non_gbv_st_fwmid_roll180",   "log_gen_prot_fwmid_roll180"
+)
+
+data.frame(
+  Variable = vars_check,
+  Skewness = sapply(joint_data[vars_check],
+                    function(x) round(skewness(x, na.rm = TRUE), 3))
+)
+```
+
+# Fieldwork Timing Controls
+
+```{r}
+# These controls are used as robustness checks in the models.
+# fieldwork_days: length of the country-year fieldwork window
+# days_since_fw_start: respondent's position within fieldwork (exact dates only)
+
+joint_data <- joint_data %>%
+  group_by(country, year) %>%
+  mutate(
+    fieldwork_days = as.numeric(end_fw - start_fw),
+    spans_two_years = as.integer(
+      year(start_fw) != year(end_fw)
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Only meaningful for respondents with exact interview dates
+    days_since_fw_start = as.numeric(date_interview - start_fw),
+    fieldwork_days_z        = as.numeric(scale(fieldwork_days)),
+    days_since_fw_start_z   = as.numeric(scale(days_since_fw_start))
+  )
+
+```
+
+# Weighted Dependent Variables (Kwak Strategy)
+
+The Kwak approach recodes the three-category participation items: - "would not do" → 0 - "might do" → 1 (full weight: intention is current) - "have done" → individual predicted probability of currently participating (down-weights past behaviour by how likely someone *like them* would do it today)
+
+The propensity model uses age, gender, education, EDI, log GDP per capita, and general protest climate (`log_gen_prot_fwmid_roll180`) as predictors. This uses the fieldwork-midpoint Roll-180 window: a country-year constant and therefore exogenous to individual interview timing, consistent with the primary exposure specification used throughout the analysis.
+
+```{r}
+library(lme4)
+
+run_kwak <- function(data, item_char, item_bin, score_col, protest_var) {
+
+  # Step 1: binary indicator for final scoring (have done + might do = 1, NA stays NA)
+  data[[item_bin]] <- case_when(
+    data[[item_char]] %in% c("have done", "might do") ~ 1,
+    is.na(data[[item_char]])                           ~ NA_real_,
+    TRUE                                               ~ 0
+  )
+
+  # Step 2: propensity model — trained only on current-intent respondents "might do" = 1, "would not" = 0; "have done" excluded from training to avoid circularity (past behaviour ≠ current willingness).
+
+  # Strip haven_labelled and other special attributes from predictors so thatmodel.matrix produces consistent design matrices across subsets.
+  plain_vars <- c("age", "female", "edi", "log_gdp_capita", protest_var)
+  for (v in plain_vars) {
+    if (v %in% names(data)) data[[v]] <- as.numeric(data[[v]])
+  }
+  # edu_recoded: convert to plain factor with all levels from the full data
+  edu_levels <- sort(unique(as.character(data[["edu_recoded"]])))
+  edu_levels <- edu_levels[!is.na(edu_levels)]
+  data[["edu_recoded"]] <- factor(as.character(data[["edu_recoded"]]),
+                                  levels = edu_levels)
+
+  train_data <- data[data[[item_char]] != "have done", ]
+  train_data[[item_bin]] <- ifelse(train_data[[item_char]] == "might do", 1, 0)
+
+  formula_str <- paste0(
+    item_bin, " ~ age + female + edu_recoded + edi + ",
+    "log_gdp_capita + ", protest_var,
+    " + (1 | country) + (1 | year)"
+  )
+  mod <- glmer(as.formula(formula_str),
+               data = train_data, family = binomial,
+               na.action = na.exclude)
+
+  # Step 3: predicted probability
+  # Training rows ("might do" / "would not"): use in-sample fitted values directly to avoid any newdata design-matrix conformability issue. "have done" rows: predict out-of-sample on a clean subset.
+  prob_col <- paste0(item_char %>% gsub("_char", "", .), "_prob")
+  data[[prob_col]] <- NA_real_
+
+  train_row_idx <- as.integer(rownames(train_data))
+  data[[prob_col]][train_row_idx] <- as.numeric(fitted(mod))
+
+  hd_idx <- which(data[[item_char]] == "have done")
+  if (length(hd_idx) > 0) {
+    # Manually compute fixed-effects prediction for "have done" rows.
+    # Using predict(newdata=) fails when a factor level is absent from train_data (glmer drops the zero-row column; the newdata design matrix keeps it).
+    # I intersect to only the columns the model actually estimated.
+    beta <- fixef(mod)
+    fe_formula <- as.formula(paste0(
+      "~ age + female + edu_recoded + edi + log_gdp_capita + ", protest_var
+    ))
+    X_hd <- model.matrix(fe_formula, data = data[hd_idx, ])
+    keep <- intersect(colnames(X_hd), names(beta))
+    data[[prob_col]][hd_idx] <- plogis(
+      as.numeric(X_hd[, keep, drop = FALSE] %*% beta[keep])
+    )
+  }
+
+  # Step 4: Kwak score
+  # "would not" → 0; "have done" → p(currently willing); "might do" → 1
+  data[[score_col]] <- case_when(
+    data[[item_bin]] == 0            ~ 0,
+    data[[item_char]] == "have done" ~ data[[prob_col]],
+    data[[item_bin]] == 1            ~ 1,
+    TRUE                             ~ NA_real_
+  )
+
+  return(data)
+}
+
+protest_var <- "log_gen_prot_fwmid_roll180"
+
+# Run Kwak on all respondents with valid roll-180 womden directed violence exposure (primary window).
+# Using roll180 protest covariate ensures China/Colombia (acled_first_year=2018) are included
+
+kwak_sample <- joint_data %>% filter(!is.na(gbv_st_fwmid_roll180))
+
+kwak_sample <- run_kwak(kwak_sample, "petition_char", "petition_would",
+                        "petition_kwak_score", protest_var)
+kwak_sample <- run_kwak(kwak_sample, "boycott_char",  "boycott_would",
+                        "boycott_kwak_score",  protest_var)
+kwak_sample <- run_kwak(kwak_sample, "demonst_char",  "demonst_would",
+                        "demonst_kwak_score",  protest_var)
+kwak_sample <- run_kwak(kwak_sample, "strike_char",   "strike_would",
+                        "strike_kwak_score",   protest_var)
+
+# Merge Kwak scores back into joint_data
+# Drop any pre-existing Kwak columns (present if this chunk is re-run in session)
+joint_data <- joint_data %>%
+  select(-any_of(c("petition_kwak_score", "boycott_kwak_score",
+                    "demonst_kwak_score",  "strike_kwak_score")))
+
+joint_data <- joint_data %>%
+  left_join(
+    kwak_sample %>% select(row_id,
+                            petition_kwak_score, boycott_kwak_score,
+                            demonst_kwak_score,  strike_kwak_score),
+    by = "row_id"
+  )
+```
+
+## Kwak Distribution Check
+
+```{r}
+# Weight distribution for 'have done' respondents (petition as representative)
+joint_data %>%
+  filter(petition_char == "have done") %>%
+  summarise(
+    n         = n(),
+    mean_wt   = mean(petition_kwak_score, na.rm = TRUE),
+    sd_wt     = sd(petition_kwak_score,   na.rm = TRUE),
+    min_wt    = min(petition_kwak_score,  na.rm = TRUE),
+    max_wt    = max(petition_kwak_score,  na.rm = TRUE)
+  )
+
+# Age gradient check
+joint_data %>%
+  filter(petition_char == "have done") %>%
+  mutate(age_group = case_when(
+    age < 30 ~ "Young (18-29)",
+    age > 65 ~ "Seniors (65+)",
+    TRUE     ~ "Middle"
+  )) %>%
+  group_by(age_group) %>%
+  summarise(avg_weight = mean(petition_kwak_score, na.rm = TRUE))
+
+# Distribution plot
+joint_data %>%
+  filter(petition_char == "have done") %>%
+  ggplot(aes(x = petition_kwak_score)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  labs(title = "Weight Distribution for 'Have Done' Respondents (Petition)",
+       x = "Kwak Propensity Score", y = "Density") +
+  theme_minimal()
+```
+
+## Kwak Sanity Check
+
+```{r kwak-sanity}
+# ── Critical check: mean Kwak score BY response category ─────────────────────
+# Expected:  "would not do" → mean = 0
+# "might do"  → mean = 1 ← if missing, the fix didn't work
+# "have done" → mean in (0,1) ← predicted probability
+
+items_check  <- c("petition", "boycott", "demonst", "strike")
+char_check   <- paste0(items_check, "_char")
+kwak_check   <- paste0(items_check, "_kwak_score")
+labels_check <- c("Petition", "Boycott", "Demonstration", "Strike")
+
+for (i in seq_along(items_check)) {
+  cat("---", labels_check[i], "---\n")
+  print(
+    joint_data %>%
+      filter(!is.na(.data[[char_check[i]]]),
+             !is.na(.data[[kwak_check[i]]])) %>%
+      group_by(response = .data[[char_check[i]]]) %>%
+      summarise(
+        n    = n(),
+        mean = round(mean(.data[[kwak_check[i]]], na.rm = TRUE), 3),
+        min  = round(min(.data[[kwak_check[i]]],  na.rm = TRUE), 3),
+        max  = round(max(.data[[kwak_check[i]]],  na.rm = TRUE), 3),
+        .groups = "drop"
+      ) %>%
+      as.data.frame()
+  )
+  cat("\n")
+}
+
+# ── Valid N and overall means ─────────────────────────────────────────────────
+cat("=== VALID N AND OVERALL MEAN PER ACTIVITY ===\n")
+for (i in seq_along(items_check)) {
+  n_valid <- sum(!is.na(joint_data[[kwak_check[i]]]))
+  m       <- round(mean(joint_data[[kwak_check[i]]], na.rm = TRUE), 3)
+  cat(sprintf("%-14s  N = %6d   mean = %.3f\n", labels_check[i], n_valid, m))
+}
+```
+
+## Save Checkpoint
+
+```{r}
+saveRDS(joint_data, "joint_data_transformed_clean.rds")
+#joint_data <- readRDS("joint_data_transformed_clean.rds")
+```
+
+# CFA — Confirmatory Factor Analysis
+
+```{r}
+library(lavaan)
+
+# Analysis sample: men only, with valid main exposure variable.
+
+final_sample_data <- subset(joint_data,
+                             female == 0 & !is.na(gbv_st_fwmid_roll180))
+
+activism_model <- '
+  Activism =~ petition_kwak_score + boycott_kwak_score + demonst_kwak_score + strike_kwak_score
+'
+```
+
+## One-Factor Model
+
+```{r}
+fit_cfa_final <- cfa(activism_model, data = final_sample_data)
+summary(fit_cfa_final, fit.measures = TRUE, standardized = TRUE)
+```
+
+## Two-Factor Model
+
+Instead of public and private mobilization potential, they were originally labelled as high-risk and low-risk mobilization potential respectively. Nevertheless, they refer to public and private mobilization as identified in the final text.
+
+```{r}
+two_factor_model <- '
+  low_risk  =~ petition_kwak_score + boycott_kwak_score
+  high_risk =~ strike_kwak_score   + demonst_kwak_score
+'
+
+fit_2 <- cfa(two_factor_model, data = final_sample_data, missing = "fiml")
+summary(fit_2, fit.measures = TRUE)
+```
+
+## Extracting Latent Scores
+
+### One factor (FIML)
+
+```{r}
+# FIML handles partial missingness on the four items without listwise deletion
+fit_cfa_fiml <- cfa(activism_model,
+                    data    = final_sample_data,
+                    missing = "fiml")
+
+scores_fiml  <- lavPredict(fit_cfa_fiml)
+used_indices <- lavInspect(fit_cfa_fiml, "case.idx")
+
+final_sample_data$activism_latent <- NA
+final_sample_data$activism_latent[used_indices] <- as.numeric(scores_fiml)
+
+cat("N with activism_latent:", sum(!is.na(final_sample_data$activism_latent)), "\n")
+```
+
+### Two factors
+
+```{r}
+scores_2fac    <- lavPredict(fit_2)
+used_idx_2fac  <- lavInspect(fit_2, "case.idx")
+
+final_sample_data$low_risk_latent  <- NA
+final_sample_data$high_risk_latent <- NA
+
+final_sample_data$low_risk_latent[used_idx_2fac]  <-
+  as.numeric(scores_2fac[, "low_risk"])
+final_sample_data$high_risk_latent[used_idx_2fac] <-
+  as.numeric(scores_2fac[, "high_risk"])
+
+# Min-max rescale to 0-1
+final_sample_data <- final_sample_data %>%
+  mutate(
+    activism_low_final  = (low_risk_latent  - min(low_risk_latent,  na.rm = TRUE)) /
+                          (max(low_risk_latent,  na.rm = TRUE) - min(low_risk_latent,  na.rm = TRUE)),
+    activism_high_final = (high_risk_latent - min(high_risk_latent, na.rm = TRUE)) /
+                          (max(high_risk_latent, na.rm = TRUE) - min(high_risk_latent, na.rm = TRUE))
+  )
+```
+
+## Main DV: activism_final (min-max rescaled one-factor score)
+
+```{r}
+final_sample_data <- final_sample_data %>%
+  mutate(
+    activism_final = (activism_latent - min(activism_latent, na.rm = TRUE)) /
+                     (max(activism_latent, na.rm = TRUE) - min(activism_latent, na.rm = TRUE))
+  )
+```
+
+## Coverage Check Across Windows
+
+```{r}
+# Coverage check: how many CYs have a valid DV and each rolling exposure window?
+# Exposure variable: gbv_ratio_fwmid_roll*_z (fwmid anchor, primary strategy)
+# Windows: Roll-180 (primary), Roll-365, Roll-730 (robustness)
+# ACLED coverage correction applied upstream means longer windows are stricter.
+
+coverage_check <- final_sample_data %>%
+  group_by(country, year) %>%
+  summarise(
+    n_resp       = n(),
+    has_dv       = sum(!is.na(activism_high_final))           > 0,
+    has_r180     = sum(!is.na(gbv_ratio_fwmid_roll180_z))     > 0,
+    has_r365     = sum(!is.na(gbv_ratio_fwmid_roll365_z))     > 0,
+    has_r730     = sum(!is.na(gbv_ratio_fwmid_roll730_z))     > 0,
+    .groups = "drop"
+  )
+
+cy_dv <- sum(coverage_check$has_dv)
+cat("CYs with valid DV:        ", cy_dv, "\n")
+cat("CYs valid — Roll-180:     ", sum(coverage_check$has_dv & coverage_check$has_r180), "\n")
+cat("CYs valid — Roll-365:     ", sum(coverage_check$has_dv & coverage_check$has_r365), "\n")
+cat("CYs valid — Roll-730:     ", sum(coverage_check$has_dv & coverage_check$has_r730), "\n")
+
+cat("\nCYs lost relative to DV:\n")
+coverage_check %>%
+  filter(has_dv) %>%
+  summarise(
+    lost_r180 = sum(!has_r180),
+    lost_r365 = sum(!has_r365),
+    lost_r730 = sum(!has_r730)
+  ) %>%
+  print()
+
+cat("\nCYs in Roll-180 but not Roll-730 (excluded by 2-year coverage requirement):\n")
+coverage_check %>%
+  filter(has_dv & has_r180 & !has_r730) %>%
+  select(country, year) %>%
+  arrange(country) %>%
+  print(n = Inf)
+```
+
+## Add Freedom-of-Expression Control (v2x_freexp_altinf)
+
+`v2x_freexp_altinf` was not included in the original VDEM `transmute()`. It is joined here from `vdem_raw` (already in memory) using the same country-name harmonisation applied earlier in the pipeline. This index captures freedom of expression and access to alternative information sources (press freedom + internet + civil society media), ranging 0–1. It serves as a control for the information-diffusion assumption: not everyone in a country is equally exposed to repression events, and how freely information circulates conditions individual-level exposure.
+
+```{r}
+# Pull v2x_freexp_altinf from the already-loaded vdem_raw
+freexp_df <- vdem_raw %>%
+  transmute(
+    country       = country_name,
+    year          = year,
+    freexp_altinf = v2x_freexp_altinf
+  ) %>%
+  mutate(country = case_match(
+    country,
+    "Türkiye"             ~ "Turkey",
+    "Palestine/West Bank" ~ "Palestine",
+    "Palestine/Gaza"      ~ "Palestine",
+    "Burma/Myanmar"       ~ "Myanmar",
+    .default = country
+  ))
+
+# Drop any prior version (safety for re-runs), join, z-score
+final_sample_data <- final_sample_data %>%
+  select(-any_of(c("freexp_altinf", "freexp_altinf_z"))) %>%
+  left_join(freexp_df, by = c("country", "year")) %>%
+  mutate(freexp_altinf_z = as.numeric(scale(freexp_altinf)))
+
+# Coverage check
+cat("N with freexp_altinf    :", sum(!is.na(final_sample_data$freexp_altinf)),   "\n")
+cat("N missing freexp_altinf :", sum(is.na(final_sample_data$freexp_altinf)),    "\n")
+cat("Country-years covered   :",
+    final_sample_data %>%
+      filter(!is.na(freexp_altinf)) %>%
+      distinct(country, year) %>% nrow(), "\n")
+```
+
+## Save Final Dataset
+
+```{r}
+saveRDS(final_sample_data, "final_sample_data_clean.rds")
+final_sample_data <- readRDS("final_sample_data_clean.rds")
+```
+
+------------------------------------------------------------------------
+
+# Descriptives
+
+```{r desc-setup}
+library(modelsummary)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+# ── Broad region labels (from VDEM e_regiongeo numeric codes) ─────────────────
+final_sample_data <- final_sample_data %>%
+  mutate(macro_region = case_when(
+    region %in% c(1, 2, 3, 4)     ~ "Europe",
+    region %in% c(5, 10)           ~ "MENA",
+    region %in% c(6, 7, 8, 9)     ~ "Sub-Saharan Africa",
+    region %in% c(11, 12, 13, 14) ~ "Asia",
+    region %in% c(16, 17, 18, 19) ~ "Americas",
+    region == 15                   ~ "Oceania",
+    TRUE                           ~ "Other"
+  ),
+  macro_region = factor(macro_region,
+    levels = c("Europe", "Americas", "Asia", "MENA",
+               "Sub-Saharan Africa", "Oceania", "Other")))
+```
+
+## Sample Overview
+
+```{r desc-sample}
+# Primary analytical sample: men with valid Roll-180 exposure and non-missing DV. Used for analytical tables (sumstats, corr matrix, rainclouds).
+desc_sample <- final_sample_data %>%
+  filter(!is.na(gbv_ratio_fwmid_roll180_z),
+         !is.na(activism_high_final))
+
+# All figures, tables, and descriptives use desc_sample exclusively so that only country-years present in the analytical models are shown.
+vis_sample <- desc_sample
+
+cat("=== Primary analytical sample (Roll-180) ===\n")
+cat("N respondents         :", nrow(desc_sample), "\n")
+cat("Countries             :", n_distinct(desc_sample$country), "\n")
+cat("Country-years         :",
+    n_distinct(paste(desc_sample$country, desc_sample$year)), "\n")
+
+# Exact-date sub-sample for reference
+exact_desc <- final_sample_data %>%
+  filter(has_exact_date,
+         !is.na(gbv_ratio_exact_roll180_z),
+         !is.na(activism_high_final))
+cat("\n=== Exact-date sub-sample ===\n")
+cat("N respondents         :", nrow(exact_desc), "\n")
+cat("Country-years         :",
+    n_distinct(paste(exact_desc$country, exact_desc$year)), "\n")
+```
+
+## Country-Year Sample Plot
+
+```{r desc-cy-dot, fig.width=9, fig.height=8}
+# Dot plot: one dot per country, x = number of waves in sample
+country_counts <- vis_sample %>%
+  group_by(country) %>%
+  summarise(n_years = n_distinct(year), .groups = "drop") %>%
+  mutate(group = factor(case_when(
+    n_years == 1 ~ "1 wave",
+    n_years == 2 ~ "2 waves",
+    n_years >= 3 ~ "3+ waves"
+  ), levels = c("1 wave", "2 waves", "3+ waves")))
+
+plot_data <- country_counts %>%
+  arrange(desc(n_years), country) %>%
+  mutate(country = factor(country, levels = rev(unique(country))))
+
+mid <- ceiling(nrow(plot_data) / 2)
+countries_sorted <- levels(plot_data$country)
+data_left  <- plot_data %>%
+  filter(country %in% rev(countries_sorted)[1:mid]) %>%
+  mutate(country = factor(country, levels = rev(unique(as.character(country)))))
+data_right <- plot_data %>%
+  filter(country %in% rev(countries_sorted)[(mid + 1):length(countries_sorted)]) %>%
+  mutate(country = factor(country, levels = rev(unique(as.character(country)))))
+
+dot_theme <- function() {
+  theme_minimal(base_size = 11, base_family = "serif") +
+  theme(
+    panel.grid.minor    = element_blank(),
+    panel.grid.major.y  = element_blank(),
+    axis.title.y        = element_blank(),
+    axis.text.x         = element_text(size = 11),
+    axis.text.y         = element_text(size = 9),
+    legend.position     = "none"
+  )
+}
+
+p_dot_l <- ggplot(data_left, aes(x = n_years, y = country, color = group)) +
+  geom_segment(aes(x = 1, xend = n_years, yend = country), color = "grey88") +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = c("1 wave" = "#FD7E14",
+                                "2 waves" = "#E63946",
+                                "3+ waves" = "#821115")) +
+  scale_x_continuous(limits = c(1, max(plot_data$n_years)), breaks = 1:5) +
+  dot_theme() + labs(x = "WVS waves in sample")
+
+p_dot_r <- ggplot(data_right, aes(x = n_years, y = country, color = group)) +
+  geom_segment(aes(x = 1, xend = n_years, yend = country), color = "grey88") +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = c("1 wave" = "#FD7E14",
+                                "2 waves" = "#E63946",
+                                "3+ waves" = "#821115")) +
+  scale_x_continuous(limits = c(1, max(plot_data$n_years)), breaks = 1:5) +
+  dot_theme() + labs(x = "WVS waves in sample")
+
+(p_dot_l | p_dot_r)
+ggsave("country_sample_clean.pdf", plot = (p_dot_l | p_dot_r),
+       width = 9, height = 8, device = "pdf")
+```
+
+## Wave Distribution over Time
+
+```{r desc-timeline, fig.width=11, fig.height=9, message=FALSE, warning=FALSE}
+# ── Timeline: which years each country appears in the sample ─────────────────
+
+# 1. Sort countries by number of waves (descending), then alphabetically
+country_order_tl <- vis_sample %>%
+  group_by(country) %>%
+  summarise(n_years = n_distinct(year), .groups = "drop") %>%
+  arrange(desc(n_years), country)
+
+df_timeline <- vis_sample %>%
+  select(country, year) %>%
+  distinct() %>%
+  mutate(country = factor(country, levels = rev(country_order_tl$country)))
+
+# 2. Split into two panels at the midpoint (left = more waves, right = fewer)
+tl_levels  <- levels(df_timeline$country)
+n_countries <- length(tl_levels)
+mid_tl     <- ceiling(n_countries / 2)
+
+tl_left  <- df_timeline %>%
+  filter(country %in% tl_levels[(mid_tl + 1):n_countries]) %>%
+  mutate(country = droplevels(country))
+
+tl_right <- df_timeline %>%
+  filter(country %in% tl_levels[1:mid_tl]) %>%
+  mutate(country = droplevels(country))
+
+# 3. Theme
+timeline_theme <- function() {
+  theme_minimal(base_size = 10, base_family = "serif") +
+  theme(
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_line(color = "grey96", linewidth = 0.2),
+    panel.grid.major.x = element_line(color = "grey98"),
+    axis.title.y       = element_blank(),
+    axis.text.y        = element_text(size = 9, family = "serif"),
+    axis.text.x        = element_text(angle = 45, hjust = 1, size = 7.5, family = "serif"),
+    axis.title.x       = element_text(size = 11, face = "italic", family = "serif"),
+    legend.position    = "none"
+  )
+}
+
+# 4. Build panels
+tl_p1 <- ggplot(tl_left, aes(x = year, y = country)) +
+  geom_line(aes(group = country), color = "grey90", linewidth = 0.3) +
+  geom_point(color = "#D94111", size = 1.8, alpha = 0.8) +
+  scale_x_continuous(breaks = seq(1990, 2024, by = 2)) +
+  labs(x = NULL) +
+  timeline_theme()
+
+tl_p2 <- ggplot(tl_right, aes(x = year, y = country)) +
+  geom_line(aes(group = country), color = "grey90", linewidth = 0.3) +
+  geom_point(color = "#D94111", size = 1.8, alpha = 0.8) +
+  scale_x_continuous(breaks = seq(1990, 2024, by = 2)) +
+  labs(x = NULL) +
+  timeline_theme()
+
+# 5. Combine and display
+final_timeline <- (tl_p1 | tl_p2)
+final_timeline
+
+ggsave("figures/timeline_waves.pdf", plot = final_timeline,
+       device = "pdf", width = 11, height = 9, units = "in")
+```
+
+## Summary Statistics
+
+```{r desc-sumstats}
+# Sample: desc_sample — men with valid Roll-180 exposure and non-missing DV (72 CYs).
+desc_vars <- desc_sample %>%
+  select(
+    `Public Mobilization`      = activism_high_final,
+    `Private Mobilization`     = activism_low_final,
+    `Gendered Repression`      = gbv_ratio_fwmid_roll180,
+    `Egalitarianism`           = gender_norms_macro,
+    `Log General Violence`     = log_non_gbv_st_fwmid_roll180,
+    `Log General Protest`      = log_gen_prot_fwmid_roll180,
+    `Age`                      = age,
+    `Income`                   = income,
+    `Married`                  = marital_status_binary,
+    `Employed`                 = employment_status_binary,
+    `Freedom of Expression`    = freexp_altinf,
+    `Civil Society Freedom`    = cso_repression,
+    `Log GDP p.c. (lag)`       = log_gdp_capita_lag,
+    `Log Misery Index (lag)`   = log_misery_lag,
+    `GDP Growth (lag)`         = growth_lag_capped,
+    `Fieldwork Duration`       = fieldwork_days,
+    `Days since FW Start`      = days_since_fw_start
+  )
+
+datasummary(
+  All(desc_vars) ~ Mean + SD + Min + Median + Max + N,
+  data  = desc_vars,
+  title = "Descriptive statistics — main analytical variables (Roll-180 analytical sample)"
+)
+
+# Education distribution (ordinal — shown separately)
+desc_sample %>%
+  filter(!is.na(edu_recoded)) %>%
+  count(edu_recoded) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  rename(Education = edu_recoded, N = n, `%` = pct) %>%
+  knitr::kable(caption = "Education distribution (fwmid analytical sample)")
+```
+
+## Correlation Matrix
+
+```{r desc-corr}
+# Correlation matrix using the Roll-180 analytical sample (72 CYs).
+# Z-scored versions used for continuous variables for consistency with models.
+cor_vars <- desc_sample %>%
+  select(
+    ` 1. Public Mobilization`  = activism_high_final,
+    ` 2. Private Mobilization` = activism_low_final,
+    ` 3. Gendered Repression`  = gbv_ratio_fwmid_roll180_z,
+    ` 4. Egalitarianism`       = gender_norms_z,
+    ` 5. Log Gen. Violence`    = log_non_gbv_st_fwmid_roll180_z,
+    ` 6. Log Gen. Protest`     = log_gen_prot_fwmid_roll180_z,
+    ` 7. Age`                  = age,
+    ` 8. Income`               = income,
+    ` 9. Married`              = marital_status_binary,
+    `10. Employed`             = employment_status_binary,
+    `11. Freedom of Expr.`     = freexp_altinf_z,
+    `12. Civil Soc. Freedom`   = cso_repression_z,
+    `13. Log GDP p.c.`         = log_gdp_capita_lag_z,
+    `14. Misery Index`         = log_misery_lag_z,
+    `15. GDP Growth`           = growth_lag_z,
+    `16. FW Duration`          = fieldwork_days_z,
+    `17. Days since FW Start`  = days_since_fw_start_z
+  )
+
+datasummary_correlation(
+  cor_vars,
+  method = "pearson",
+  fmt    = 2,
+  title  = "Pearson correlation matrix — main variables (Roll-180 analytical sample)"
+)
+```
+
+## Egalitarianism Index Distribution
+
+```{r desc-norms-dist, fig.width=7, fig.height=4}
+# 1. Aggregate to Country-Year first (to match your Map/Raincloud logic)
+egalitarian_summary <- vis_sample %>%
+  group_by(country, year) %>%
+  summarise(avg_egalitarian = mean(gender_norms_macro, na.rm = TRUE), .groups = "drop")
+
+# 2. Plot the Distribution
+hist_egal <- ggplot(egalitarian_summary, aes(x = avg_egalitarian)) +
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 15, 
+                 fill = "#2b8cbe", 
+                 alpha = 0.4, 
+                 color = "white") +
+  geom_density(color = "#2b8cbe", linewidth = 1) +
+  geom_rug(alpha = 0.5, color = "#2b8cbe") +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  theme_minimal(base_family = "serif", base_size = 14) + # Increased base_size
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    # Larger Axis Titles
+    axis.title.x = element_text(size = 15, margin = margin(t = 12)), 
+    axis.title.y = element_text(size = 15, margin = margin(r = 12)),
+    # Larger Axis Labels (the numbers)
+    axis.text = element_text(size = 12, color = "black"),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  labs(
+    x = "Egalitarian Index (Country-Year Average)",
+    y = "Density"
+  )
+
+ggsave(plot = hist_egal, 
+       file = "hist_density_egalitarian.pdf", 
+       width = 7, 
+       height = 4.5, 
+       device = "pdf",
+       # Setting 'useDingbats = FALSE' is often safer for LaTeX PDFs
+       useDingbats = FALSE)
+```
+
+## Gendered Repression Ratio Distribution
+
+```{r desc-gbv-dist, fig.width=7, fig.height=4}
+ggplot(vis_sample %>% distinct(country, year, gbv_ratio_fwmid_roll180),
+       aes(x = gbv_ratio_fwmid_roll180)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30, fill = "#DD8452", color = "white", alpha = 0.8) +
+  geom_density(color = "#C44E52", linewidth = 0.8) +
+  theme_minimal(base_family = "serif") +
+  theme(
+    axis.title = element_text(size = 13),
+    axis.text  = element_text(size = 12)
+  ) +
+  labs(x = "Gend Rep ratio (ytd+1y, fieldwork-midpoint anchor)",
+       y = "Density",
+       title = "Distribution of Gend Rep ratio across country-years")
+```
+
+## Raincloud Plots by Region
+
+```{r desc-raincloud, fig.width=10, fig.height=5, message=FALSE, warning=FALSE}
+library(ggdist)
+
+# ── Aggregate to country-year means ───────────────────────────────────────────
+# high_risk and gender_norms from desc_sample (72-CY analytical sample). gbv_ratio from vis_sample (= desc_sample) using roll180, consistent with analytical models.
+cy_analytical <- desc_sample %>%
+  group_by(country, year, macro_region) %>%
+  summarise(
+    high_risk    = mean(activism_high_final, na.rm = TRUE),
+    gender_norms = mean(gender_norms_macro,  na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cy_gbv <- vis_sample %>%
+  group_by(country, year, macro_region) %>%
+  summarise(
+    gbv_ratio = mean(gbv_ratio_fwmid_roll180, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cy_data <- cy_analytical %>%
+  left_join(cy_gbv %>% select(country, year, gbv_ratio),
+            by = c("country", "year")) %>%
+  filter(macro_region != "Other")
+
+# High-risk mobilisation (demonstrations + strikes)
+p_high <- ggplot(cy_data, aes(x = macro_region, y = high_risk, fill = macro_region)) +
+  stat_halfeye(adjust = .5, width = .6, .width = 0,
+               justification = -.3, point_colour = NA, alpha = 0.7) +
+  geom_boxplot(width = .12, outlier.shape = NA, alpha = 0.5, color = "grey30") +
+  geom_point(aes(color = macro_region), size = 1.5, alpha = 0.4,
+             position = position_jitter(width = .12, seed = 1)) +
+  stat_summary(fun = "mean", geom = "point", shape = 18, size = 3, color = "black") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set2") +
+  scale_color_brewer(palette = "Set2") +
+  scale_y_continuous(limits = c(0, 0.75), breaks = seq(0, 0.75, 0.25)) +
+  theme_minimal(base_family = "serif") +
+  theme(
+    legend.position    = "none",
+    panel.grid.major.y = element_blank(),
+    axis.title.x       = element_text(size = 14, margin = margin(t = 10)),
+    axis.text.x        = element_text(size = 12),
+    axis.text.y        = element_text(size = 12)
+  ) +
+  labs(x = NULL, y = "Public Mobilization Score")
+
+p_high
+ggsave("raincloud_mobilization.pdf", plot = p_high, width = 8, height = 5, device = "pdf")
+```
+
+```{r desc-raincloud-lookup, message=FALSE, warning=FALSE}
+# ── Country-year lookup: who is where in the distribution? ────────────────────
+# Sorted by region then descending high-risk score so you can identify
+# outliers, clusters, and tails discussed in the descriptive text.
+
+cy_lookup <- cy_data %>%
+  arrange(macro_region, desc(high_risk)) %>%
+  mutate(high_risk = round(high_risk, 3))
+
+# Print full table grouped by region
+cy_lookup %>%
+  split(.$macro_region) %>%
+  walk2(names(.), function(df, region) {
+    cat("\n──", region, "──\n")
+    df %>%
+      select(country, year, high_risk) %>%
+      print(n = Inf)
+  })
+
+# Quick extreme-value flags (useful for identifying outliers/tail cases)
+cat("\n── Top 10 high-risk country-years (all regions) ──\n")
+cy_lookup %>% slice_max(high_risk, n = 15) %>%
+  select(country, year, macro_region, high_risk) %>% print()
+
+cat("\n── Bottom 10 high-risk country-years (all regions) ──\n")
+cy_lookup %>% slice_min(high_risk, n = 10) %>%
+  select(country, year, macro_region, high_risk) %>% print()
+
+cat("\n── Country-years above 0.5 on high-risk ──\n")
+cy_lookup %>% filter(high_risk > 0.5) %>%
+  select(country, year, macro_region, high_risk) %>%
+  arrange(macro_region, desc(high_risk)) %>% print(n = Inf)
+```
+
+```{r desc-raincloud-gbv, fig.width=8, fig.height=5}
+# Gend Rep ratio by region
+p_gbv <- ggplot(cy_data %>% filter(!is.na(gbv_ratio)),
+                aes(x = macro_region, y = gbv_ratio, fill = macro_region)) +
+  stat_halfeye(adjust = .5, width = .6, .width = 0,
+               justification = -.3, point_colour = NA, alpha = 0.7) +
+  geom_boxplot(width = .12, outlier.shape = NA, alpha = 0.5, color = "grey30") +
+  geom_point(aes(color = macro_region), size = 1.5, alpha = 0.4,
+             position = position_jitter(width = .12, seed = 2)) +
+  stat_summary(fun = "mean", geom = "point", shape = 18, size = 3, color = "black") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set2") +
+  scale_color_brewer(palette = "Set2") +
+  theme_minimal(base_family = "serif") +
+  theme(
+    legend.position    = "none",
+    panel.grid.major.y = element_blank(),
+    axis.title.x       = element_text(size = 14, margin = margin(t = 10)),
+    axis.text.x        = element_text(size = 12),
+    axis.text.y        = element_text(size = 12)
+  ) +
+  labs(x = NULL, y = "Gendered Repression Ratio")
+print(p_gbv)
+ggsave("raincloud_wdv.pdf", plot = p_gbv, width = 8, height = 5, device = "pdf")
+```
+
+```{r desc-raincloud-egal, fig.width=8, fig.height=5}
+# Egalitarianism by region
+p_egal <- ggplot(cy_data, aes(x = macro_region, y = gender_norms, fill = macro_region)) +
+  stat_halfeye(adjust = .5, width = .6, .width = 0,
+               justification = -.3, point_colour = NA, alpha = 0.7) +
+  geom_boxplot(width = .12, outlier.shape = NA, alpha = 0.5, color = "grey30") +
+  geom_point(aes(color = macro_region), size = 1.5, alpha = 0.4,
+             position = position_jitter(width = .12, seed = 3)) +
+  stat_summary(fun = "mean", geom = "point", shape = 18, size = 3, color = "black") +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set2") +
+  scale_color_brewer(palette = "Set2") +
+  theme_minimal(base_family = "serif") +
+  theme(
+    legend.position    = "none",
+    panel.grid.major.y = element_blank(),
+    axis.title.x       = element_text(size = 14, margin = margin(t = 10)),
+    axis.text.x        = element_text(size = 12),
+    axis.text.y        = element_text(size = 12)
+  ) +
+  labs(x = NULL, y = "Egalitarian Index")
+print(p_egal)
+ggsave("raincloud_egal.pdf", plot = p_egal, width = 8, height = 5, device = "pdf")
+```
+
+## World Maps
+
+```{r desc-map-ratio, fig.width=10, fig.height=5.5, message=FALSE, warning=FALSE}
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+
+# ── Shared map theme ──────────────────────────────────────────────────────────
+my_map_theme <- function() {
+  theme_void(base_family = "serif") +
+  theme(
+    legend.position  = "bottom",
+    legend.title     = element_text(size = 9),
+    legend.text      = element_text(size = 8),
+    plot.title       = element_blank(),
+    plot.caption     = element_text(size = 7, colour = "grey40",
+                                    hjust = 0, margin = margin(t = 6)),
+    plot.margin      = margin(10, 10, 10, 10)
+  )
+}
+
+# ── Aggregate: mean Gend Rep ratio & count per country (all CYs with valid DV) ──────
+map_stats <- vis_sample %>%
+  group_by(country, year) %>%
+  summarise(
+    avg_wdv_share = mean(gbv_ratio_fwmid_roll180, na.rm = TRUE),
+    avg_wdv_count = mean(gbv_st_fwmid_roll180,    na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(country) %>%
+  summarise(
+    avg_wdv_share = mean(avg_wdv_share, na.rm = TRUE),
+    avg_wdv_count = mean(avg_wdv_count, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+world        <- ne_countries(scale = "medium", returnclass = "sf")
+world_joined <- world %>% left_join(map_stats, by = c("name" = "country"))
+
+# ── Map: Gend Rep share ────────────────────────────────────────────────────────────
+wdv_map_share <- ggplot(data = world_joined) +
+  geom_sf(aes(fill = avg_wdv_share), color = "white", size = 0.1) +
+  scale_fill_distiller(
+    palette   = "Blues",
+    direction = 1,
+    na.value  = "grey92",
+    name      = NULL,
+    limits    = c(0, 0.25),
+    oob       = scales::squish,
+    breaks    = c(0, 0.10, 0.20),
+    labels    = scales::percent_format(accuracy = 1)
+  ) +
+  labs(caption = paste(
+  #  "Exposure window: Jan 1 of prior year to fieldwork midpoint (ytd+1y, fwmid anchor).",
+  #  "Values averaged across country-years in the analytical sample. Grey = not in sample.",
+   # "Values above 25% squished to top colour. Source: ACLED."
+  )) +
+  my_map_theme()
+
+print(wdv_map_share)
+ggsave(plot = wdv_map_share, file = "map_gendered_repression_share.pdf",
+       width = 10, height = 5.5, device = "pdf")
+```
+
+```{r desc-map-count, fig.width=10, fig.height=5.5, message=FALSE, warning=FALSE}
+# ── Map: GBV event count ──────────────────────────────────────────────────────
+wdv_map_counts <- ggplot(data = world_joined) +
+  geom_sf(aes(fill = avg_wdv_count), color = "white", size = 0.1) +
+  scale_fill_distiller(
+    palette   = "Reds",
+    direction = 1,
+    na.value  = "grey92",
+    name      = NULL,
+    limits    = c(0, 15),
+    breaks    = c(0, 5, 10),
+    oob       = scales::squish
+  ) +
+  labs(caption = paste(
+ #   "Raw count of state-perpetrated GBV events recorded by ACLED.",
+  #  "Exposure window: Jan 1 of prior year to fieldwork midpoint (ytd+1y, fwmid anchor).",
+  #  "Values averaged across country-years in the analytical sample. Grey = not in sample.",
+ #   "Values above 40 events squished to top colour. Source: ACLED."
+  )) +
+  my_map_theme()
+
+print(wdv_map_counts)
+ggsave(plot = wdv_map_counts, file = "map_gendered_repression_counts.pdf",
+       width = 10, height = 5.5, device = "pdf")
+```
+
+## Evolution Plots
+
+```{r desc-evol-gbv, fig.width=12, fig.height=9, message=FALSE, warning=FALSE}
+# ── Gend Rep ratio over time (countries with ≥2 waves only) ───────────────────────
+evolution_data_gbv <- vis_sample %>%
+  group_by(country, year) %>%
+  summarise(wdv_share = mean(gbv_ratio_fwmid_roll180, na.rm = TRUE), .groups = "drop") %>%
+  group_by(country) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+p_evolution_gbv <- ggplot(evolution_data_gbv, aes(x = year, y = wdv_share)) +
+  geom_line(color = "#2b8cbe", alpha = 0.6, linewidth = 0.6) +
+  geom_point(color = "#2b8cbe", size = 1.5) +
+  facet_wrap(~country, ncol = 6, scales = "free_y") +
+  coord_cartesian(ylim = c(0, NA)) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor  = element_blank(),
+    strip.text        = element_text(face = "bold", size = 13),
+    axis.text.x       = element_text(angle = 45, hjust = 1, size = 9),
+    axis.text.y       = element_text(size = 9),
+    axis.title.x      = element_text(size = 15, margin = margin(t = 15)),
+    axis.title.y      = element_text(size = 15, margin = margin(r = 15)),
+    panel.spacing     = unit(1.2, "lines")
+  ) +
+  labs(x = "Year", y = "Gendered Repression Ratio")
+
+print(p_evolution_gbv)
+ggsave("wdv_evolution.pdf", p_evolution_gbv,
+       width = 12, height = 9, device = "pdf", useDingbats = FALSE)
+```
+
+```{r desc-evol-egal, fig.width=12, fig.height=9, message=FALSE, warning=FALSE}
+# ── Gender egalitarianism over time (countries with ≥2 waves only) ────────────
+evolution_data_egal <- vis_sample %>%
+  group_by(country, year) %>%
+  summarise(egal_share = mean(gender_norms_macro, na.rm = TRUE), .groups = "drop") %>%
+  group_by(country) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+p_evolution_egal <- ggplot(evolution_data_egal, aes(x = year, y = egal_share)) +
+  geom_line(color = "#2b8cbe", alpha = 0.6, linewidth = 0.6) +
+  geom_point(color = "#2b8cbe", size = 1.5) +
+  facet_wrap(~country, ncol = 6, scales = "free_y") +
+  coord_cartesian(ylim = c(0, NA)) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal(base_size = 12, base_family = "serif") +
+  theme(
+    panel.grid.minor  = element_blank(),
+    strip.text        = element_text(face = "bold", size = 13),
+    axis.text.x       = element_text(angle = 45, hjust = 1, size = 9),
+    axis.text.y       = element_text(size = 9),
+    axis.title.x      = element_text(size = 15, margin = margin(t = 15)),
+    axis.title.y      = element_text(size = 15, margin = margin(r = 15)),
+    panel.spacing     = unit(1.2, "lines")
+  ) +
+  labs(x = "Year", y = "Egalitarianism Index")
+
+print(p_evolution_egal)
+ggsave("egal_evolution.pdf", p_evolution_egal,
+       width = 12, height = 9, device = "pdf", useDingbats = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# Models
+
+```{r model-setup}
+library(lme4)
+library(modelsummary)
+
+# ── Custom glance so modelsummary reports country-year count ──────────────────
+# lme4 stores the random-effect grouping factor in the "flist" slot. I extract the number of levels from (1|country:year).
+glance_custom.lmerMod <- function(x, ...) {
+  flist <- lme4::getME(x, "flist")
+  n_cy  <- if ("country:year" %in% names(flist))
+              length(levels(flist[["country:year"]]))
+            else NA_integer_
+  data.frame(n_country_year = n_cy)
+}
+
+# GOF rows shown in every table
+gof_custom <- tibble::tribble(
+  ~raw,              ~clean,             ~fmt,
+  "nobs",            "N (respondents)",  0,
+  "n_country_year",  "Country-years",    0,
+  "r2.marginal",     "R² (marginal)",    3,
+  "r2.conditional",  "R² (conditional)", 3,
+  "aic",             "AIC",              1
+)
+
+# ── Derive z-scored macro variables not yet in final_sample_data ──────────────
+# These are computed here (not in the joint_data pipeline) because they depend on the final analytical sample composition after all filters are applied.
+final_sample_data <- final_sample_data %>%
+  mutate(
+    log_gdp_capita_lag_z = as.numeric(scale(log_gdp_capita_lag)),
+    log_misery_lag_z     = as.numeric(scale(log_misery_lag)),
+    cso_repression_z     = as.numeric(scale(cso_repression))
+  )
+
+# ── Shared formula building blocks (used by all model sections) ───────────────
+# M1: bare (Gend Rep ratio only)
+# M2: + interaction with egalitarianism (no controls)
+# M3: + individual-level controls
+# M4: + all country-year controls (macro + window-matched violence/protest + timing)
+
+# Individual: quadratic age, education, income, marital status, employment
+# Macro: freedom of expression, lagged GDP, lagged misery index, GDP growth, civil society repression (structural organisational capacity)
+# Window CY: general violence + general protest (window-matched, added in loop)
+# Timing: fieldwork duration (CY-level), days since FW start (respondent-level, exact-date only)
+
+# Note on CSO repression: v2csreprss (VDEM) measures institutional constraints on civil society — distinct from log_non_gbv_st (event-based contemporaneous violence).
+# Correlation between the two = -0.443; included to separate the GBV-specific mobilisation pathway from general organisational capacity suppression.
+
+ctrl_indiv <- paste(
+  "age + I(age^2) + edu_recoded + income +",
+  "marital_status_binary + employment_status_binary"
+)
+
+ctrl_macro <- "freexp_altinf_z + log_gdp_capita_lag_z + log_misery_lag_z + growth_lag_z + cso_repression_z"
+
+time_c <- "fieldwork_days_z + days_since_fw_start_z"
+re     <- "(1 | country:year)"
+
+# Primary specification: fwmid strategy, rolling windows only
+
+windows_fwmid     <- c("roll180", "roll365", "roll730")
+win_label_fwmid   <- c("Roll-180", "Roll-365", "Roll-730")
+
+# Robustness: exact-date strategy, three rolling windows (mirrors fwmid)
+
+windows_exact     <- c("roll180", "roll365", "roll730")
+win_label_exact   <- c("Roll-180", "Roll-365", "Roll-730")
+
+# Keep 'windows' and 'win_label' as aliases to fwmid for backward compatibility
+
+windows   <- windows_fwmid
+win_label <- win_label_fwmid
+
+dvs      <- c("activism_high_final")
+```
+
+## Primary Specification: Structural Ambient (Fieldwork-Midpoint)
+
+The primary empirical strategy uses the **fieldwork midpoint** (`midpoint_fw`) as a common anchor date for all respondents within a country-wave, producing a gendered repression ratio exposure measure that is constant within country-years. Identification therefore comes entirely from **between-country-year** variation in the ambient level of gendered repression — whether country-waves characterised by higher women-directed violence exposure produce systematically different male mobilisation, net of individual and country-year controls.
+
+This strategy is preferred on three grounds. First, variance decomposition shows that 91.4% of the variance in the individually-anchored Gend Rep ratio lies between country-years rather than within them (ICC = 0.914), confirming that between-CY variation is the dominant source of identifying signal regardless of anchoring choice. Second, 66.7% of exact-date country-years recorded no women-directed violence event during the fieldwork period, meaning within-wave variation in the individually-anchored ratio reflects fluctuations in general violence (the denominator) rather than changes in women-directed violene — measurement noise rather than genuine exposure variation. Third, the structural ambient strategy aligns with the theoretical argument: the mobilising signal of gendered repression is expected to operate through sustained societal exposure and social interpretation, not through direct individual witness of specific events.
+
+Four nested specifications are estimated per window (Roll-180, Roll-365, Roll-730). The dependent variable is **`activism_high_final`** (high-risk mobilisation: strikes + demonstrations).
+
+| Model | Specification |
+|-------------|-----------------------------------------------------------|
+| M1 | Gend rep ratio + `(1\|country:year)` |
+| M2 | Gend rep ratio × Egalitarianism + `(1\|country:year)` |
+| M3 | M2 + individual controls (age², education, income, marital status, employment) |
+| M4 | M3 + macro controls (freedom of expression, GDP, misery, growth, CSO repression) + window-matched general violence & protest + fieldwork timing |
+
+```{r fwmid-sample}
+# ── Fieldwork-midpoint sample ─────────────────────────────────────────────────
+# All men in final_sample_data; no exact-date filter needed.
+fwmid_data <- final_sample_data
+
+cat("Fieldwork-midpoint sample\n")
+cat("  N respondents  :", nrow(fwmid_data), "\n")
+cat("  Country-years  :", n_distinct(paste(fwmid_data$country, fwmid_data$year)), "\n")
+cat("  N with DV      :", sum(!is.na(fwmid_data$activism_high_final)), "\n")
+
+# Verify coverage for fwmid windows
+fwmid_coverage <- fwmid_data %>%
+  group_by(country, year) %>%
+  summarise(
+    has_r180 = any(!is.na(gbv_ratio_fwmid_roll180_z)),
+    has_r365 = any(!is.na(gbv_ratio_fwmid_roll365_z)),
+    has_r730 = any(!is.na(gbv_ratio_fwmid_roll730_z)),
+    .groups  = "drop"
+  )
+
+cat("\nCountry-years with valid fwmid exposure by window:\n")
+fwmid_coverage %>%
+  summarise(across(starts_with("has_"), sum)) %>%
+  print()
+```
+
+```{r fwmid-models}
+# ── Run all fwmid models ──────────────────────────────────────────────────────
+# Models stored as: models_fwmid[["<dv>_<window>_m<1-4>"]]
+
+# NOTE: fwmid models use a TRIMMED timing block (time_c_fw).
+# days_since_fw_start_z is individual-level and NA for respondents without an exact S012 date. Including it would silently restrict the sample to ~57 CY, collapsing back to the exact-date sample.
+
+time_c_fw <- "fieldwork_days_z"
+
+models_fwmid <- list()
+
+for (dv in dvs) {
+  for (w in windows_fwmid) {
+    gv      <- paste0("gbv_ratio_fwmid_", w, "_z")
+    gv_w    <- paste0("log_non_gbv_st_fwmid_", w, "_z + I(log_non_gbv_st_fwmid_", w, "_z^2) + log_gen_prot_fwmid_", w, "_z")
+    ctrl_cy <- paste(ctrl_macro, "+", gv_w, "+", time_c_fw)
+    key     <- paste(dv, w, sep = "_")
+
+    f1 <- paste(dv, "~", gv,                                                         "+", re)
+    f2 <- paste(dv, "~", gv, "* gender_norms_z +",                                        re)
+    f3 <- paste(dv, "~", gv, "* gender_norms_z +", ctrl_indiv, "+",                       re)
+    f4 <- paste(dv, "~", gv, "* gender_norms_z +", ctrl_indiv, "+", ctrl_cy, "+",        re)
+
+    # Restrict all models to M4 complete cases so N is constant across M1–M4
+    m4_vars  <- c(dv, all.vars(as.formula(paste("~", gv, "* gender_norms_z +",
+                                                  ctrl_indiv, "+", ctrl_cy))))
+    data_bal <- fwmid_data[complete.cases(fwmid_data[, intersect(m4_vars, names(fwmid_data))]), ]
+
+    models_fwmid[[paste0(key, "_m1")]] <- lmer(as.formula(f1), data = data_bal, REML = FALSE)
+    models_fwmid[[paste0(key, "_m2")]] <- lmer(as.formula(f2), data = data_bal, REML = FALSE)
+    models_fwmid[[paste0(key, "_m3")]] <- lmer(as.formula(f3), data = data_bal, REML = FALSE)
+    models_fwmid[[paste0(key, "_m4")]] <- lmer(as.formula(f4), data = data_bal, REML = FALSE)
+  }
+}
+
+cat("Models fitted:", length(models_fwmid), "\n")
+
+# Find all list elements where the name ends with "_m4"
+m4_models_mid <- models_fwmid[grep("_m4$", names(models_fwmid))]
+
+# View the regression table for Model 4 across all windows
+texreg::screenreg(m4_models_mid)
+```
+
+------------------------------------------------------------------------
+
+## Robustness Specification: Interview-Date-Anchored
+
+The interview-date-anchored specification assigns each respondent a gendered repression ratio computed over the rolling window ending on their individual verified interview date (S012). In principle this allows within-country-year identification: respondents interviewed during higher-women directed violence periods are compared to contemporaries in the same country-year who were interviewed during lower-GBV periods, with the `(1|country:year)` random effect absorbing all between-wave confounding.
+
+In practice, three empirical findings limit the inferential value of this strategy relative to the structural ambient approach. First, the ICC of the individually-anchored Gend Rep ratio is 0.914, meaning 91.4% of its variance lies between country-years — the random effect absorbs the mean DV for each CY, but the fixed-effect estimate of Gend Rep ratio still draws overwhelmingly on between-CY variation, not within-wave timing. Second, within-wave ratio variation in those CYs is purely denominator-driven (general violence fluctuating), not genuine GBV exposure change. These models are therefore retained as a robustness check on measurement sensitivity. 
+
+| Model | Specification |
+|-------------|-----------------------------------------------------------|
+| M1 | Gend rep ratio + `(1\|country:year)` |
+| M2 | Gend rep ratio × Egalitarianism + `(1\|country:year)` |
+| M3 | M2 + individual controls |
+| M4 | M3 + macro controls + window-matched violence & protest + fieldwork timing |
+
+```{r exact-sample}
+# ── Exact-date sample ─────────────────────────────────────────────────────────
+exact_data <- final_sample_data %>% filter(has_exact_date)
+
+# Common exact-date sample: CYs with valid roll-730 exact-date exposure. Mirrors cy_r730 for fwmid — holds sample constant across windows.
+cy_r730_exact <- exact_data %>%
+  group_by(country, year) %>%
+  filter(any(!is.na(gbv_ratio_exact_roll730_z))) %>%
+  ungroup()
+
+cat("Exact-date sample (full):", nrow(exact_data), "respondents,",
+    n_distinct(paste(exact_data$country, exact_data$year)), "CYs\n")
+cat("Exact-date common sample:", nrow(cy_r730_exact), "respondents,",
+    n_distinct(paste(cy_r730_exact$country, cy_r730_exact$year)), "CYs\n")
+```
+
+```{r exact-models}
+# ── Run all exact-date models (common roll-730 sample) ────────────────────────
+# Uses cy_r730_exact so all three windows run on the same CYs.
+# M4 complete-case restriction keeps N constant across M1–M4.
+models_exact <- list()
+
+for (dv in dvs) {
+  for (w in windows_exact) {
+    gv      <- paste0("gbv_ratio_exact_", w, "_z")
+    gv_w    <- paste0("log_non_gbv_st_exact_", w, "_z + I(log_non_gbv_st_exact_", w, "_z^2) + log_gen_prot_exact_", w, "_z")
+    ctrl_cy <- paste(ctrl_macro, "+", gv_w, "+", time_c)
+    key     <- paste(dv, w, sep = "_")
+
+    f1 <- paste(dv, "~", gv,                                                         "+", re)
+    f2 <- paste(dv, "~", gv, "* gender_norms_z +",                                        re)
+    f3 <- paste(dv, "~", gv, "* gender_norms_z +", ctrl_indiv, "+",                       re)
+    f4 <- paste(dv, "~", gv, "* gender_norms_z +", ctrl_indiv, "+", ctrl_cy, "+",        re)
+
+    m4_vars  <- c(dv, all.vars(as.formula(paste("~", gv, "* gender_norms_z +",
+                                                  ctrl_indiv, "+", ctrl_cy))))
+    data_bal <- cy_r730_exact[complete.cases(
+      cy_r730_exact[, intersect(m4_vars, names(cy_r730_exact))]), ]
+
+    models_exact[[paste0(key, "_m1")]] <- lmer(as.formula(f1), data = data_bal, REML = FALSE)
+    models_exact[[paste0(key, "_m2")]] <- lmer(as.formula(f2), data = data_bal, REML = FALSE)
+    models_exact[[paste0(key, "_m3")]] <- lmer(as.formula(f3), data = data_bal, REML = FALSE)
+    models_exact[[paste0(key, "_m4")]] <- lmer(as.formula(f4), data = data_bal, REML = FALSE)
+  }
+}
+
+cat("Models fitted:", length(models_exact), "\n")
+
+library(purrr)
+library(stringr)
+
+# Find all list elements where the name ends with "_m4"
+m4_models <- models_exact[grep("_m4$", names(models_exact))]
+
+# View the regression table for Model 4 across all windows
+texreg::screenreg(m4_models)
+
+```
+
+::: callout-note
+**Why is the exact-date sample smaller?** `exact_data` filters `final_sample_data` to respondents with a verified S012 interview date (roughly 55–65% of WVS Wave 7 respondents per country). Additional listwise deletion on `activism_high_final` (the strike item was not administered in some African country-years) and on covariates reduces the sample further to \~57 country-years.
+:::
+
+------------------------------------------------------------------------
+
+# Main Results
+
+## Main Results
+
+Two tables are presented. **Table 1** shows the four nested model specifications (M1–M4) for Roll-180 — the shortest rolling window, capturing recent gend rep salience — displaying only the three theoretically central estimates (gend rep ratio, egalitarianism, their interaction) with control inclusion indicated by checkmarks. This allows assessment of how estimates of interest behave as controls are progressively added. **Table 2** then shows the M4 (full controls) estimates across all three rolling windows simultaneously, demonstrating the temporal sensitivity of effects. Full coefficient tables for all windows appear in Appendix A; the model-building progression appears in Appendix C.
+
+```{r tbl-main-results, message=FALSE, warning=FALSE}
+library(modelsummary)
+library(kableExtra)
+
+# ── Helper retained for LaTeX export and Appendix C (M1–M4 build table) ──────
+make_build_table <- function(model_list, strategy, window = "roll180",
+                             caption_txt, output = "default") {
+  gv <- paste0("gbv_ratio_", strategy, "_", window, "_z")
+  mods <- list(
+    "M1" = model_list[[paste0("activism_high_final_", window, "_m1")]],
+    "M2" = model_list[[paste0("activism_high_final_", window, "_m2")]],
+    "M3" = model_list[[paste0("activism_high_final_", window, "_m3")]],
+    "M4" = model_list[[paste0("activism_high_final_", window, "_m4")]]
+  )
+  cm <- c(setNames(list("Gend. Repression (z)"), gv),
+          list("gender_norms_z" = "Egalitarianism (z)"))
+  cm[[paste0(gv, ":gender_norms_z")]] <- "Gend. Repression × Egalitarianism"
+  cm[[paste0("gender_norms_z:", gv)]] <- "Gend. Repression × Egalitarianism"
+  ctrl_rows <- tribble(
+    ~term,                         ~M1, ~M2,  ~M3,  ~M4,
+    "Individual controls",         "",  "",   "✓",  "✓",
+    "Macro controls",              "",  "",   "",   "✓",
+    "CSO repression",              "",  "",   "",   "✓",
+    "General violence & protest",  "",  "",   "",   "✓",
+    "Fieldwork timing",            "",  "",   "",   "✓"
+  )
+  attr(ctrl_rows, "position") <- 7:11
+  modelsummary(mods, coef_map = cm, add_rows = ctrl_rows,
+               stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+               gof_map = gof_custom, title = caption_txt, output = output,
+               notes = paste("Standard errors in parentheses.",
+                             "Outcome: high-risk mobilisation.",
+                             "Random intercept (1|country:year) in all models.",
+                             "Full coefficient tables in Appendix A."))
+}
+
+# ── Table 1: Three-window comparison (M4, structural ambient) ─────────────────
+# Columns = Roll-180 / Roll-365 / Roll-730 — all M4 full controls. Since I am agnostic on which window best captures the mobilising signal, all three are shown simultaneously as a temporal sensitivity ladder. Coefficients from different windows are mapped to shared row labels so that gend rep ratio, egalitarianism , and their interaction each occupy a single row.
+make_three_window_table <- function(model_list, strategy, caption_txt,
+                                    output = "default") {
+  wins   <- c("roll180", "roll365", "roll730")
+  labels <- c("Roll-180", "Roll-365", "Roll-730")
+
+  mods <- setNames(
+    lapply(wins, function(w)
+      model_list[[paste0("activism_high_final_", w, "_m4")]]),
+    labels
+  )
+
+  # Map all three GBV variable names to the same display label
+  cm <- list("gender_norms_z" = "Egalitarianism (z)")
+  for (w in wins) {
+    gv  <- paste0("gbv_ratio_", strategy, "_", w, "_z")
+    cm[[gv]]                              <- "Gend. Repression (z)"
+    cm[[paste0(gv, ":gender_norms_z")]]  <- "Gend. Repression × Egalitarianism"
+    cm[[paste0("gender_norms_z:", gv)]]  <- "Gend. Repression × Egalitarianism"
+  }
+
+  # All columns are M4: all controls present
+  ctrl_rows <- tribble(
+    ~term,                         ~`Roll-180`, ~`Roll-365`, ~`Roll-730`,
+    "Individual controls",         "✓",         "✓",         "✓",
+    "Macro controls",              "✓",         "✓",         "✓",
+    "CSO repression",              "✓",         "✓",         "✓",
+    "General violence & protest",  "✓",         "✓",         "✓",
+    "Fieldwork timing",            "✓",         "✓",         "✓"
+  )
+  attr(ctrl_rows, "position") <- 7:11
+
+  modelsummary(
+    mods,
+    coef_map  = cm,
+    add_rows  = ctrl_rows,
+    stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+    gof_map   = gof_custom,
+    title     = caption_txt,
+    output    = output,
+    notes     = paste(
+      "Standard errors in parentheses.",
+      "Outcome: high-risk mobilisation (demonstrations + strikes).",
+      "All models M4: individual controls, macro controls, Society Repression,",
+      "window-matched general violence and protest, fieldwork timing.",
+      "Random intercept (1|country:year). Full tables in Appendix A."
+    )
+  )
+}
+
+# ── Table 1: Model-building progression (M1–M4, Roll-180) ────────────────────
+make_build_table(
+  models_fwmid, "fwmid", "roll180",
+  "Table 1: High-risk mobilisation — Model building, Roll-180 (structural ambient)"
+)
+
+# ── Table 2: Window sensitivity (M4, Roll-180 / Roll-365 / Roll-730) ──────────
+make_three_window_table(
+  models_fwmid, "fwmid",
+  "Table 2: High-risk mobilisation — M4, all windows (structural ambient)"
+)
+```
+
+## Robustness: Common-Sample Window Comparison (61 Country-Years)
+
+Table 3 re-estimates M4 for all three rolling windows on the common intersection sample — the 61 country-years for which the most restrictive (730-day) window yields valid GBV exposure. By holding the sample constant, any differences across columns reflect temporal window choice rather than sample composition. This tests whether the results in Table 2 are sensitive to the inclusion of country-years with shorter ACLED coverage histories.
+
+```{r tbl-robustness-common-sample, message=FALSE, warning=FALSE}
+# ── Restrict to 61 CYs with valid roll-730 coverage ──────────────────────────
+cy_r730 <- fwmid_data %>%
+  group_by(country, year) %>%
+  filter(any(!is.na(gbv_ratio_fwmid_roll730_z))) %>%
+  ungroup()
+
+cat("Common-sample (roll-730 restriction)\n")
+cat("  N respondents :", nrow(cy_r730), "\n")
+cat("  Country-years :", n_distinct(paste(cy_r730$country, cy_r730$year)), "\n")
+
+# ── Run M4 for all three windows on the common sample ─────────────────────────
+models_r730_common <- list()
+
+for (w in windows_fwmid) {
+  gv      <- paste0("gbv_ratio_fwmid_", w, "_z")
+  gv_w    <- paste0("log_non_gbv_st_fwmid_", w, "_z + I(log_non_gbv_st_fwmid_", w, "_z^2) + log_gen_prot_fwmid_", w, "_z")
+  ctrl_cy <- paste(ctrl_macro, "+", gv_w, "+", time_c_fw)
+  f4 <- paste("activism_high_final ~", gv, "* gender_norms_z +",
+               ctrl_indiv, "+", ctrl_cy, "+", re)
+  models_r730_common[[paste0("activism_high_final_", w, "_m4")]] <-
+    lmer(as.formula(f4), data = cy_r730, REML = FALSE)
+}
+
+# ── Table 3: M4, all windows, common 61-CY sample ─────────────────────────────
+make_three_window_table(
+  models_r730_common, "fwmid",
+  "Table 3: High-risk mobilisation — M4, all windows, common sample (61 CYs)"
+)
+```
+
+## Marginal Effects and Predicted Values
+
+```{r marginal-effects, message=FALSE, warning=FALSE}
+# ══════════════════════════════════════════════════════════════════════════════
+# UNIFIED: Marginal Effects and Predicted Values (Roll-180 and all windows)
+# ══════════════════════════════════════════════════════════════════════════════
+
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(patchwork)
+
+# ── Theme (consistent across all plots) ───────────────────────────────────────
+# ── Theme (Updated with y-axis title margin) ──────────────────────────────────
+theme_main <- theme_minimal(base_family = "serif", base_size = 15) +
+  theme(
+    # Added margin(r = 12) to push the title to the left, away from the numbers
+    axis.title.y         = element_text(size = 17, face = "plain", margin = margin(r = 12)),
+    axis.title.x         = element_text(size = 17, face = "plain", margin = margin(t = 10)),
+    axis.text            = element_text(size = 15),
+    legend.title         = element_text(size = 15, face = "bold"),
+    legend.text          = element_text(size = 14),
+    legend.position      = "bottom",
+    strip.text           = element_text(size = 16, face = "bold"),
+    strip.background     = element_rect(fill = "grey95", color = NA),
+    panel.grid.minor     = element_blank(),
+    panel.grid.major.y   = element_line(color = "grey95", linewidth = 0.3),
+    panel.grid.major.x   = element_blank(),
+    plot.title           = element_text(size = 16, face = "bold", hjust = 0), # Slightly smaller title text to prevent overlaps
+    plot.subtitle        = element_text(size = 14, color = "grey50", hjust = 0),
+    plot.caption         = element_text(size = 12, color = "grey50", hjust = 0)
+  )
+
+# ── Colour palette ────────────────────────────────────────────────────────────
+col_patriarchal  <- "#821115"   # -1.5 SD egalitarianism
+col_egalitarian  <- "#2b8cbe"   # +1.5 SD egalitarianism
+col_ame          <- "#4C72B0"   # AME line
+col_band         <- "grey75"    # CI ribbon
+
+# ── Helper 1: Extract coefficients and vcov ──────────────────────────────────
+get_coefs <- function(model, ratio_var) {
+  b   <- fixef(model)
+  v   <- as.matrix(vcov(model))
+  int <- paste0(ratio_var, ":gender_norms_z")
+  if (!int %in% names(b)) int <- paste0("gender_norms_z:", ratio_var)
+  list(
+    b_ratio = b[[ratio_var]],
+    b_int   = b[[int]],
+    var_ratio = v[ratio_var, ratio_var],
+    var_int   = v[int, int],
+    cov_ri    = v[ratio_var, int]
+  )
+}
+
+# ── Helper 2: Compute AME ────────────────────────────────────────────────────
+compute_ame <- function(model, ratio_var, data, window_label) {
+  coefs  <- get_coefs(model, ratio_var)
+  eg_seq <- seq(
+    min(data$gender_norms_z, na.rm = TRUE),
+    max(data$gender_norms_z, na.rm = TRUE),
+    length.out = 100
+  )
+  ame <- coefs$b_ratio + coefs$b_int * eg_seq
+  se  <- sqrt(
+    coefs$var_ratio +
+    eg_seq^2 * coefs$var_int +
+    2 * eg_seq * coefs$cov_ri
+  )
+  tibble(
+    gender_norms_z = eg_seq,
+    ame            = ame,
+    lower          = ame - 1.96 * se,
+    upper          = ame + 1.96 * se,
+    window         = window_label
+  )
+}
+
+# ── Helper 3: Compute predicted values ────────────────────────────────────────
+compute_predictions <- function(model, ratio_var, data, window_label) {
+  b      <- fixef(model)
+  v      <- as.matrix(vcov(model))
+  int    <- paste0(ratio_var, ":gender_norms_z")
+  if (!int %in% names(b)) int <- paste0("gender_norms_z:", ratio_var)
+
+  ratio_seq <- seq(
+    min(data[[ratio_var]], na.rm = TRUE),
+    max(data[[ratio_var]], na.rm = TRUE),
+    length.out = 100
+  )
+
+  mean_pred <- mean(predict(model, re.form = NA), na.rm = TRUE)
+  ratio_mean <- mean(data[[ratio_var]], na.rm = TRUE)
+  norms_mean <- mean(data$gender_norms_z, na.rm = TRUE)
+
+  intercept_eff <- mean_pred -
+    b[[ratio_var]] * ratio_mean -
+    b[["gender_norms_z"]] * norms_mean -
+    b[[int]] * ratio_mean * norms_mean
+
+  pmap_dfr(
+    list(
+      eg_val = c(-1.5, 1.5),
+      label  = c("Patriarchal (-1.5 SD)", "Egalitarian (+1.5 SD)")
+    ),
+    function(eg_val, label) {
+      pred <- intercept_eff +
+        b[[ratio_var]] * ratio_seq +
+        b[["gender_norms_z"]] * eg_val +
+        b[[int]] * ratio_seq * eg_val
+
+      se <- sqrt(
+        v[ratio_var, ratio_var] * ratio_seq^2 +
+        v[int, int] * (ratio_seq * eg_val)^2 +
+        2 * v[ratio_var, int] * ratio_seq * ratio_seq * eg_val
+      )
+
+      tibble(
+        ratio_val      = ratio_seq,
+        predicted      = pred,
+        conf.low       = pred - 1.96 * se,
+        conf.high      = pred + 1.96 * se,
+        group          = label,
+        window         = window_label
+      )
+    }
+  )
+}
+
+# ── Compute all windows ──────────────────────────────────────────────────────
+ame_all <- bind_rows(
+  compute_ame(models_fwmid[["activism_high_final_roll180_m4"]],
+              "gbv_ratio_fwmid_roll180_z", fwmid_data, "Roll-180"),
+  compute_ame(models_fwmid[["activism_high_final_roll365_m4"]],
+              "gbv_ratio_fwmid_roll365_z", fwmid_data, "Roll-365"),
+  compute_ame(models_fwmid[["activism_high_final_roll730_m4"]],
+              "gbv_ratio_fwmid_roll730_z", fwmid_data, "Roll-730")
+) %>%
+  mutate(window = factor(window, levels = c("Roll-180", "Roll-365", "Roll-730")))
+
+pred_all <- bind_rows(
+  compute_predictions(models_fwmid[["activism_high_final_roll180_m4"]],
+                      "gbv_ratio_fwmid_roll180_z", fwmid_data, "Roll-180"),
+  compute_predictions(models_fwmid[["activism_high_final_roll365_m4"]],
+                      "gbv_ratio_fwmid_roll365_z", fwmid_data, "Roll-365"),
+  compute_predictions(models_fwmid[["activism_high_final_roll730_m4"]],
+                      "gbv_ratio_fwmid_roll730_z", fwmid_data, "Roll-730")
+) %>%
+  mutate(
+    window = factor(window, levels = c("Roll-180", "Roll-365", "Roll-730")),
+    group  = factor(group,  levels = c("Patriarchal (-1.5 SD)", "Egalitarian (+1.5 SD)"))
+  )
+
+```
+
+```{r plot-ame-roll180, fig.width=9, fig.height=6}
+# ── Plot 1: AME for Roll-180 only ────────────────────────────────────────────
+p_ame_180 <- ame_all %>%
+  filter(window == "Roll-180") %>%
+  ggplot(aes(x = gender_norms_z, y = ame)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.4) +
+  geom_ribbon(aes(ymin = lower, ymax = upper),
+              fill = col_band, alpha = 0.25) +
+  geom_line(color = col_ame, linewidth = 1) +
+  labs(
+    title    = "Marginal Effect of Gendered Repression across Egalitarianism (Roll-180)",
+    x        = "Egalitarianism (z-scored)",
+    y        = "Average marginal effect\non public mobilisation"
+  ) +
+  theme_main
+
+p_ame_180
+ggsave("figures/ame_roll180.pdf", p_ame_180, width = 9, height = 6)
+```
+
+```{r plot-ame-all-windows, fig.width=14, fig.height=5.5}
+# ── Plot 2: AME for all three windows ────────────────────────────────────────
+p_ame_all <- ame_all %>%
+  ggplot(aes(x = gender_norms_z, y = ame)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.4) +
+  geom_ribbon(aes(ymin = lower, ymax = upper),
+              fill = col_band, alpha = 0.25) +
+  geom_line(color = col_ame, linewidth = 1) +
+  facet_wrap(~ window, nrow = 1) +
+  labs(
+ #   title    = "Marginal Effect of Gendered Repression across Egalitarianism — All Windows",
+    x        = "Egalitarianism (z-scored)",
+    y        = "Average Marginal Effect\non Public Mobilization"
+  ) +
+  theme_main
+
+p_ame_all
+ggsave("figures/ame_all_windows.pdf", p_ame_all, width = 14, height = 5.5)
+```
+
+```{r plot-pred-roll180, fig.width=9, fig.height=6}
+# ── Plot 3: Predicted values for Roll-180 only ──────────────────────────────
+p_pred_180 <- pred_all %>%
+  filter(window == "Roll-180") %>%
+  ggplot(aes(x = ratio_val, y = predicted,
+             color = group, fill = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c(col_patriarchal, col_egalitarian), name = NULL) +
+  scale_fill_manual(values  = c(col_patriarchal, col_egalitarian), name = NULL) +
+  labs(
+    title    = "Predicted Mobilisation across Gendered Repression Levels (Roll-180)",
+    x        = "Gendered Repression Ratio (z-scored)",
+    y        = "Predicted public mobilisation"
+  ) +
+  theme_main
+
+p_pred_180
+ggsave("figures/pred_roll180.pdf", p_pred_180, width = 9, height = 6)
+```
+
+```{r plot-pred-all-windows, fig.width=14, fig.height=5.5}
+# ── Plot 4: Predicted values for all three windows ─────────────────────────
+p_pred_all <- pred_all %>%
+  ggplot(aes(x = ratio_val, y = predicted,
+             color = group, fill = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high),
+              alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ window, nrow = 1) +
+  scale_color_manual(values = c(col_patriarchal, col_egalitarian), name = NULL) +
+  scale_fill_manual(values  = c(col_patriarchal, col_egalitarian), name = NULL) +
+  labs(
+  #  title    = "Predicted Mobilization across Gendered Repression Levels — All Windows",
+    x        = "Gendered Repression Ratio (z-scored)",
+    y        = "Predicted Public Mobilization"
+  ) +
+  theme_main
+
+p_pred_all
+ggsave("figures/pred_all_windows.pdf", p_pred_all, width = 14, height = 5.5)
+```
+
+
+
+```{r plot-ame-roll180}
+# ── Plot 1: AME for Roll-180 only ────────────────────────────────────────────
+p_ame_180 <- ame_all %>%
+  filter(window == "Roll-180") %>%
+  ggplot(aes(x = gender_norms_z, y = ame)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.4) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = col_band, alpha = 0.25) +
+  geom_line(color = col_ame, linewidth = 1) +
+  labs(
+    title    = "Average Marginal Effects", # Cleaner, shorter title
+    x        = "Egalitarianism (z-scored)",
+    y        = "Average Marginal Effect\non Public Mobilization"
+  ) +
+  theme_main
+
+# ── Plot 3: Predicted values for Roll-180 only ──────────────────────────────
+p_pred_180 <- pred_all %>%
+  filter(window == "Roll-180") %>%
+  ggplot(aes(x = ratio_val, y = predicted, color = group, fill = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c(col_patriarchal, col_egalitarian), name = NULL) +
+  scale_fill_manual(values  = c(col_patriarchal, col_egalitarian), name = NULL) +
+  labs(
+    title    = "Predicted Mobilization", # Cleaner, shorter title
+    x        = "Gendered Repression Ratio (z-scored)",
+    y        = "Predicted Public Mobilization" # Adjust to match your y label style
+  ) +
+  theme_main
+
+
+# ── Plot 5: Side-by-side Squarish AME + Predictions ─────────────────────────
+p_combined_final <- (p_ame_180 + p_pred_180) +
+  plot_annotation(
+    theme = theme(plot.caption = element_text(family = "serif", size = 11,
+                                              color = "grey50", hjust = 0))
+  )
+
+p_combined_final
+
+# Exporting at 14x7 expands the overall scale slightly
+ggsave("figures/combined_ame_pred_roll180_final.pdf", p_combined_final, width = 14, height = 7)
+```
+
+## Coefficient Plot
+
+```{r coef-plot, fig.width=10, fig.height=7, message=FALSE, warning=FALSE}
+library(broom.mixed)
+
+windows_key <- c("roll180", "roll365", "roll730")
+windows_lab <- c("Roll-180", "Roll-365", "Roll-730 (primary)")
+
+# ── Extract Gend Rep ratio and GBV×Norms from all M4 models ───────────────────────
+extract_coefs <- function(model_list, strategy, dv_name, dv_label) {
+  purrr::map_dfr(seq_along(windows_key), function(i) {
+    w     <- windows_key[i]
+    gv    <- paste0("gbv_ratio_", strategy, "_", w, "_z")
+    model <- model_list[[paste0(dv_name, "_", w, "_m4")]]
+    if (is.null(model)) return(NULL)
+
+    td <- broom.mixed::tidy(model, conf.int = TRUE, conf.method = "Wald") %>%
+      filter(effect == "fixed") %>%
+      mutate(p.value = 2 * pnorm(abs(statistic), lower.tail = FALSE))
+
+    # Gend Rep ratio row
+    gbv_row   <- filter(td, term == gv)
+    # Egalitarianism main effect
+    norm_row  <- filter(td, term == "gender_norms_z")
+    # Interaction — R may order either way
+    int_row   <- filter(td, grepl(paste0(gv, ":gender_norms_z|gender_norms_z:", gv), term))
+
+    bind_rows(
+      if (nrow(gbv_row) > 0) tibble(
+        window    = windows_lab[i],
+        term      = "Gend. Repression",
+        estimate  = gbv_row$estimate,
+        conf.low  = gbv_row$conf.low,
+        conf.high = gbv_row$conf.high,
+        p.value   = gbv_row$p.value,
+        strategy  = strategy,
+        dv        = dv_label
+      ),
+      if (nrow(norm_row) > 0) tibble(
+        window    = windows_lab[i],
+        term      = "Egalitarianism",
+        estimate  = norm_row$estimate[1],
+        conf.low  = norm_row$conf.low[1],
+        conf.high = norm_row$conf.high[1],
+        p.value   = norm_row$p.value[1],
+        strategy  = strategy,
+        dv        = dv_label
+      ),
+      if (nrow(int_row) > 0) tibble(
+        window    = windows_lab[i],
+        term      = "Gend. Repression × Egalitarianism",
+        estimate  = int_row$estimate[1],
+        conf.low  = int_row$conf.low[1],
+        conf.high = int_row$conf.high[1],
+        p.value   = int_row$p.value[1],
+        strategy  = strategy,
+        dv        = dv_label
+      )
+    )
+  })
+}
+
+# Restricted common sample (61 CYs): ensures window comparison is not confounded by sample composition — same country-years across all three windows.
+coef_data <- bind_rows(
+  extract_coefs(models_r730_common, "fwmid", "activism_high_final", "High-risk")
+) %>%
+  mutate(
+    window = factor(window, levels = rev(windows_lab)),
+    term   = factor(term, levels = c(
+      "Gend. Repression",
+      "Egalitarianism",
+      "Gend. Repression × Egalitarianism"
+    )),
+    strategy = "Structural ambient",
+    sig      = p.value < 0.05
+  )
+
+# ── Plot ──────────────────────────────────────────────────────────────────────
+ggplot(coef_data,
+       aes(x = estimate, y = window, alpha = sig)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_pointrange(
+    aes(xmin = conf.low, xmax = conf.high),
+    colour    = "#E41A1C",
+    linewidth = 0.7,
+    size      = 0.6
+  ) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.30), guide = "none") +
+  facet_wrap(~ term, scales = "free_x", nrow = 1) +
+  theme_minimal(base_family = "serif", base_size = 14) +
+  theme(
+    legend.position   = "none",
+    panel.grid.minor  = element_blank(),
+    panel.grid.major.y = element_blank(),
+    strip.text        = element_text(size = 14, face = "bold"),
+    axis.title.x      = element_text(size = 13, margin = margin(t = 10)),
+    axis.text.x       = element_text(size = 12),
+    axis.text.y       = element_text(size = 12),
+    strip.background  = element_rect(fill = "grey95", colour = NA),
+    panel.spacing     = unit(1.5, "lines")
+  ) +
+  labs(
+    x = "Coefficient estimate (95% CI)",
+    y = NULL
+  )
+
+ggsave("coef_plot_main.pdf", width = 11, height = 5, device = "pdf")
+```
+
+------------------------------------------------------------------------
+
+## LaTeX Export for Overleaf
+
+```{r latex-export, message=FALSE, warning=FALSE}
+# ── Creates a tex_tables/ folder and writes one .tex file per table ───────────
+# In Overleaf: upload the folder contents and use \input{tex_tables/<file>.tex}
+# inside a table environment, e.g.:
+#
+#   \begin{table}[ht]
+#     \centering
+#     \input{tex_tables/table1_exact_r730.tex}
+#   \end{table}
+#
+# Re-run this chunk whenever models change; re-upload the .tex files to Overleaf.
+
+dir.create("tex_tables", showWarnings = FALSE)
+
+# ── Table 1: model-building progression (M1–M4, Roll-365) ───────────────────
+make_build_table(
+  models_fwmid, "fwmid", "roll365",
+  "High-risk mobilisation — Model building, Roll-365 (structural ambient)",
+  output = "tex_tables/table1_build_r365.tex"
+)
+
+# ── Table 2: three-window comparison (M4, common 61-CY sample) ───────────────
+# Uses restricted common sample so differences across columns reflect window
+# length only, not sample composition.
+make_three_window_table(
+  models_r730_common, "fwmid",
+  "High-risk mobilisation — M4, all windows, common sample (61 CYs, structural ambient)",
+  output = "tex_tables/table2_fwmid_threewindows.tex"
+)
+
+# ── Appendix C: full model-building progression (M1–M4, all windows) ────────
+win_labels_full <- c("Roll-180 (6 months)", "Roll-365 (1 year)", "Roll-730 (2 years)")
+for (i in seq_along(windows_fwmid)) {
+  w <- windows_fwmid[i]
+  make_full_build_table(
+    models_fwmid, "fwmid", w,
+    paste0("Appendix C", i, ": Full model-building — ", win_labels_full[i],
+           ", structural ambient"),
+    output = paste0("tex_tables/appendixC", i, "_fullbuild_", w, ".tex")
+  )
+}
+
+# ── Key Coefficients Summary Table (M4, three fwmid windows) ─────────────────
+make_summary(
+  models_fwmid, "fwmid",
+  "Key coefficients — Structural ambient strategy (M4, Roll-180/365/730)"
+) %>%
+  save_kable("tex_tables/table2_summary_fwmid.tex")
+
+# ── Appendix A: fwmid, all rolling windows, M4 (full coefficients, 61-CY) ────
+# Common intersection sample: same 61 CYs across all three windows.
+app_high_fwmid_list <- lapply(windows_fwmid, function(w)
+  models_r730_common[[paste0("activism_high_final_", w, "_m4")]])
+names(app_high_fwmid_list) <- win_label_fwmid
+
+modelsummary(
+  app_high_fwmid_list,
+  coef_map = coef_map_fwmid_all,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = gof_custom,
+  output   = "tex_tables/appendixA_fwmid_allwindows.tex",
+  title    = "Appendix A: High-risk mobilisation — Structural ambient, all rolling windows, common sample (61 CYs, M4)"
+)
+
+# ── Robustness Table R1: exact-date, Roll-730, compact M1–M4 ─────────────────
+make_build_table(
+  models_exact, "exact", "roll730",
+  "Robustness: High-risk mobilisation — Model building, Roll-730 (interview-date-anchored)",
+  output = "tex_tables/robustness_exact_r730.tex"
+)
+
+# ── Appendix B: exact-date, Roll-365/730, M4 (full coefficients) ─────────────
+app_high_exact_list <- lapply(windows_exact, function(w)
+  models_exact[[paste0("activism_high_final_", w, "_m4")]])
+names(app_high_exact_list) <- win_label_exact
+
+modelsummary(
+  app_high_exact_list,
+  coef_map = coef_map_exact_all,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = gof_custom,
+  output   = "tex_tables/appendixB_exact_allwindows.tex",
+  title    = "Appendix B: High-risk mobilisation — Interview-date-anchored, all windows, common sample (M4)"
+)
+
+cat("✓ LaTeX tables written to tex_tables/\n")
+list.files("tex_tables/")
+```
+
+------------------------------------------------------------------------
+
+# Appendix
+
+## Appendix A: Structural Ambient — All Rolling Windows (M4, Common 61-CY Sample)
+
+Full coefficient table for the primary (fieldwork-midpoint) strategy across all three rolling windows, estimated on the common intersection sample (61 country-years with valid roll-730 exposure). Holding the sample constant isolates window length as the only source of variation across columns.
+
+```{r}
+# Common 61-CY sample: all three windows on the same country-years
+app_high_fwmid_app <- lapply(windows_fwmid, function(w)
+  models_r730_common[[paste0("activism_high_final_", w, "_m4")]])
+names(app_high_fwmid_app) <- win_label_fwmid
+
+coef_map_fwmid_all <- c(
+  "gbv_ratio_fwmid_roll180_z"                    = "Gend. Repression (Roll-180)",
+  "gbv_ratio_fwmid_roll365_z"                    = "Gend. Repression (Roll-365)",
+  "gbv_ratio_fwmid_roll730_z"                    = "Gend. Repression (Roll-730)",
+  "gender_norms_z"                               = "Egalitarianism (z)",
+  "gbv_ratio_fwmid_roll180_z:gender_norms_z"     = "Gend. Repression × Egalitarianism (Roll-180)",
+  "gbv_ratio_fwmid_roll365_z:gender_norms_z"     = "Gend. Repression × Egalitarianism (Roll-365)",
+  "gbv_ratio_fwmid_roll730_z:gender_norms_z"     = "Gend. Repression × Egalitarianism (Roll-730)",
+  "age"                                          = "Age",
+  "I(age^2)"                                     = "Age²",
+  "edu_recodedmiddle"                            = "Education: middle",
+  "edu_recodedupper"                             = "Education: upper",
+  "income"                                       = "Income",
+  "marital_status_binary"                        = "Married",
+  "employment_status_binary"                     = "Employed",
+  "freexp_altinf_z"                              = "Freedom of Expression (z)",
+  "log_gdp_capita_lag_z"                         = "Log GDP p.c. (lag, z)",
+  "log_misery_lag_z"                             = "Misery Index (lag, z)",
+  "growth_lag_z"                                 = "GDP Growth (lag, z)",
+    "cso_repression_z"                           = "Civil Society Freedom (z)",
+  "log_non_gbv_st_fwmid_roll180_z"               = "Log General Violence (Roll-180)",
+  "I(log_non_gbv_st_fwmid_roll180_z^2)"          = "Log General Violence² (Roll-180)",
+  "log_gen_prot_fwmid_roll180_z"                 = "Log General Protest (Roll-180)",
+  "log_non_gbv_st_fwmid_roll365_z"               = "Log General Violence (Roll-365)",
+  "I(log_non_gbv_st_fwmid_roll365_z^2)"          = "Log General Violence² (Roll-365)",
+  "log_gen_prot_fwmid_roll365_z"                 = "Log General Protest (Roll-365)",
+  "log_non_gbv_st_fwmid_roll730_z"               = "Log General Violence (Roll-730)",
+  "I(log_non_gbv_st_fwmid_roll730_z^2)"          = "Log General Violence² (Roll-730)",
+  "log_gen_prot_fwmid_roll730_z"                 = "Log General Protest (Roll-730)",
+  "fieldwork_days_z"                             = "Fieldwork Duration (z)"
+)
+
+modelsummary(
+  app_high_fwmid_app,
+  coef_map = coef_map_fwmid_all,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map   = gof_custom,
+  title     = "Appendix A: High-risk mobilisation — Structural ambient, all rolling windows (M4)"
+)
+```
+
+## Appendix B: Interview-Date-Anchored — Robustness (M4, Common Sample)
+
+Full coefficient table for the interview-date-anchored robustness specification, estimated on the common intersection sample (CYs with valid roll-730 exact-date exposure) so all three windows are directly comparable. See main text for discussion of the anchor artefact.
+
+```{r}
+app_high_exact_app <- lapply(windows_exact, function(w)
+  models_exact[[paste0("activism_high_final_", w, "_m4")]])
+names(app_high_exact_app) <- win_label_exact
+
+coef_map_exact_all <- c(
+  "gbv_ratio_exact_roll180_z"                    = "Gend. Repression (Roll-180)",
+  "gbv_ratio_exact_roll365_z"                    = "Gend. Repression (Roll-365)",
+  "gbv_ratio_exact_roll730_z"                    = "Gend. Repression (Roll-730)",
+  "gender_norms_z"                               = "Egalitarianism (z)",
+  "gbv_ratio_exact_roll180_z:gender_norms_z"     = "Gend. Repression × Egalitarianism (Roll-180)",
+  "gbv_ratio_exact_roll365_z:gender_norms_z"     = "Gend. Repression × Egalitarianism (Roll-365)",
+  "gbv_ratio_exact_roll730_z:gender_norms_z"     = "Gend. Repression × Egalitarianism (Roll-730)",
+  "age"                                          = "Age",
+  "I(age^2)"                                     = "Age²",
+  "edu_recodedmiddle"                            = "Education: middle",
+  "edu_recodedupper"                             = "Education: upper",
+  "income"                                       = "Income",
+  "marital_status_binary"                        = "Married",
+  "employment_status_binary"                     = "Employed",
+  "freexp_altinf_z"                              = "Freedom of Expression (z)",
+  "log_gdp_capita_lag_z"                         = "Log GDP p.c. (lag, z)",
+  "log_misery_lag_z"                             = "Misery Index (lag, z)",
+  "growth_lag_z"                                 = "GDP Growth (lag, z)",
+  "cso_repression_z"                             = "Society Repression (z)",
+  "log_non_gbv_st_exact_roll180_z"               = "Log General Violence (Roll-180)",
+  "I(log_non_gbv_st_exact_roll180_z^2)"          = "Log General Violence² (Roll-180)",
+  "log_gen_prot_exact_roll180_z"                 = "Log General Protest (Roll-180)",
+  "log_non_gbv_st_exact_roll365_z"               = "Log General Violence (Roll-365)",
+  "I(log_non_gbv_st_exact_roll365_z^2)"          = "Log General Violence² (Roll-365)",
+  "log_gen_prot_exact_roll365_z"                 = "Log General Protest (Roll-365)",
+  "log_non_gbv_st_exact_roll730_z"               = "Log General Violence (Roll-730)",
+  "I(log_non_gbv_st_exact_roll730_z^2)"          = "Log General Violence² (Roll-730)",
+  "log_gen_prot_exact_roll730_z"                 = "Log General Protest (Roll-730)",
+  "fieldwork_days_z"                             = "Fieldwork Duration (z)",
+  "days_since_fw_start_z"                        = "Days since FW Start (z)"
+)
+
+modelsummary(
+  app_high_exact_app,
+  coef_map = coef_map_exact_all,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map   = gof_custom,
+  title     = "Appendix B: High-risk mobilisation — Interview-date-anchored, all windows, common sample (M4)"
+)
+```
+
+## Appendix C: Full Model-Building Progression (M1–M4, Roll-180)
+
+Full coefficient tables showing all predictors across the four nested model specifications for Roll-180.
+
+```{r appendix-c-roll180, message=FALSE, warning=FALSE}
+# ── Full-coefficient M1–M4 table for Roll-180 ────────────────────────────────
+# Shows all predictors across M1 → M2 → M3 → M4 for the primary window
+
+make_full_build_table <- function(model_list, strategy, window,
+                                  caption_txt, output = "default") {
+  gv  <- paste0("gbv_ratio_", strategy, "_", window, "_z")
+  gvw <- paste0("log_non_gbv_st_", strategy, "_", window, "_z")
+  gpw <- paste0("log_gen_prot_",   strategy, "_", window, "_z")
+
+  mods <- list(
+    "M1" = model_list[[paste0("activism_high_final_", window, "_m1")]],
+    "M2" = model_list[[paste0("activism_high_final_", window, "_m2")]],
+    "M3" = model_list[[paste0("activism_high_final_", window, "_m3")]],
+    "M4" = model_list[[paste0("activism_high_final_", window, "_m4")]]
+  )
+
+  cm <- c(
+    setNames(c("Gend. Repression (z)"),              gv),
+    "gender_norms_z"                               = "Egalitarianism (z)",
+    setNames(c("Gend. Repression × Egalitarianism"),
+             paste0(gv, ":gender_norms_z")),
+    setNames(c("Gend. Repression × Egalitarianism"),
+             paste0("gender_norms_z:", gv)),
+    "age"                                          = "Age",
+    "I(age^2)"                                     = "Age²",
+    "edu_recodedmiddle"                            = "Education: middle",
+    "edu_recodedupper"                             = "Education: upper",
+    "income"                                       = "Income",
+    "marital_status_binary"                        = "Married",
+    "employment_status_binary"                     = "Employed",
+    "freexp_altinf_z"                              = "Freedom of Expression (z)",
+    "log_gdp_capita_lag_z"                         = "Log GDP p.c. (lag, z)",
+    "log_misery_lag_z"                             = "Misery Index (lag, z)",
+    "growth_lag_z"                                 = "GDP Growth (lag, z)",
+    "cso_repression_z"                             = "Society Repression (z)",
+    setNames(c("Log General Violence (z)"),        gvw),
+    setNames(c("Log General Violence² (z)"),       paste0("I(", gvw, "^2)")),
+    setNames(c("Log General Protest (z)"),         gpw),
+    "fieldwork_days_z"                             = "Fieldwork Duration (z)",
+    "days_since_fw_start_z"                        = "Days since FW Start (z)"
+  )
+
+  modelsummary(
+    mods,
+    coef_map = cm,
+    stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+    gof_map  = gof_custom,
+    title    = caption_txt,
+    output   = output,
+    notes    = paste(
+      "Standard errors in parentheses.",
+      "Outcome: high-risk mobilisation (demonstrations + strikes).",
+      "Random intercept (1|country:year) in all models."
+    )
+  )
+}
+
+# Generate table for Roll-180 (primary window)
+make_full_build_table(
+  models_fwmid, "fwmid", "roll180",
+  "Appendix C: Full Model-Building Progression — Roll-180 (6 months), Structural Ambient (M1–M4)"
+)
+```
+
+## Appendix D: Low-Risk Mobilisation — All Windows (M4)
+
+Low-risk mobilisation (petitions and boycotts, Kwak-weighted) across the three rolling windows using the structural ambient (fieldwork-midpoint) strategy. All specifications are M4 (full controls), estimated on the common 61-CY sample for direct comparability with the main high-risk results.
+
+```{r appendix-d-low-risk, message=FALSE, warning=FALSE}
+# ── Low-risk M4 across all windows, fwmid, common 61-CY sample ───────────────
+low_fwmid_m4 <- list(
+  "Roll-180" = models_low_fwmid[["low_roll180_m4"]],
+  "Roll-365" = models_low_fwmid[["low_roll365_m4"]],
+  "Roll-730" = models_low_fwmid[["low_roll730_m4"]]
+)
+
+modelsummary(
+  low_fwmid_m4,
+  coef_map = coef_map_fwmid_all,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = gof_custom,
+  title    = "Appendix D: Low-Risk Mobilisation — Structural ambient, all windows, common sample (61 CYs, M4)",
+  output = "tex_tables/low_risk_models.tex"
+)
+```
+
+------------------------------------------------------------------------
+
+# Robustness Analyses
+
+The following robustness checks probe the sensitivity of the main results to specification choices, sample composition, and modelling assumptions. Each section states what is being tested and what the results imply.
+
+------------------------------------------------------------------------
+
+## R1 — Interview-Date-Anchored Specification
+
+Full coefficient tables for the interview-date-anchored specification appear in Appendix B, estimated on the common intersection sample (CYs with valid roll-730 exact-date exposure) so all three windows are directly comparable. As discussed in the model setup section, the divergent interaction sign under this anchor is attributable to within-wave anchor noise rather than a substantive finding — 77.2% of exact-date CYs recorded no GBV event during fieldwork, meaning within-wave ratio variation is denominator-driven rather than genuine exposure change. The coefficient plot below shows how estimates behave across windows under this alternative anchoring strategy.
+
+```{r coef-plot-exact, fig.width=11, fig.height=5, message=FALSE, warning=FALSE}
+library(broom.mixed)
+
+windows_key_ex <- c("roll180", "roll365", "roll730")
+windows_lab_ex <- c("Roll-180", "Roll-365", "Roll-730")
+
+coef_data_exact <- purrr::map_dfr(seq_along(windows_key_ex), function(i) {
+  w     <- windows_key_ex[i]
+  gv    <- paste0("gbv_ratio_exact_", w, "_z")
+  model <- models_exact[[paste0("activism_high_final_", w, "_m4")]]
+  if (is.null(model)) return(NULL)
+
+  td <- broom.mixed::tidy(model, conf.int = TRUE, conf.method = "Wald") %>%
+    filter(effect == "fixed") %>%
+    mutate(p.value = 2 * pnorm(abs(statistic), lower.tail = FALSE))
+
+  gbv_row  <- filter(td, term == gv)
+  norm_row <- filter(td, term == "gender_norms_z")
+  int_row  <- filter(td, grepl(paste0(gv, ":gender_norms_z|gender_norms_z:", gv), term))
+
+  bind_rows(
+    if (nrow(gbv_row)  > 0) tibble(window = windows_lab_ex[i],
+      term = "Gend. Repression",
+      estimate = gbv_row$estimate, conf.low = gbv_row$conf.low,
+      conf.high = gbv_row$conf.high, p.value = gbv_row$p.value),
+    if (nrow(norm_row) > 0) tibble(window = windows_lab_ex[i],
+      term = "Egalitarianism",
+      estimate = norm_row$estimate[1], conf.low = norm_row$conf.low[1],
+      conf.high = norm_row$conf.high[1], p.value = norm_row$p.value[1]),
+    if (nrow(int_row)  > 0) tibble(window = windows_lab_ex[i],
+      term = "Gend. Repression × Egalitarianism",
+      estimate = int_row$estimate[1], conf.low = int_row$conf.low[1],
+      conf.high = int_row$conf.high[1], p.value = int_row$p.value[1])
+  )
+}) %>%
+  mutate(
+    window = factor(window, levels = rev(windows_lab_ex)),
+    term   = factor(term, levels = c(
+      "Gend. Repression", "Egalitarianism",
+      "Gend. Repression × Egalitarianism")),
+    sig = p.value < 0.05
+  )
+
+ggplot(coef_data_exact, aes(x = estimate, y = window, alpha = sig)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high),
+                  colour = "#377EB8", linewidth = 0.7, size = 0.6) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.30), guide = "none") +
+  facet_wrap(~ term, scales = "free_x", nrow = 1) +
+  theme_minimal(base_family = "serif", base_size = 14) +
+  theme(
+    legend.position    = "none",
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_blank(),
+    strip.text         = element_text(size = 14, face = "bold"),
+    axis.title.x       = element_text(size = 13, margin = margin(t = 10)),
+    axis.text.x        = element_text(size = 12),
+    axis.text.y        = element_text(size = 12),
+    strip.background   = element_rect(fill = "grey95", colour = NA),
+    panel.spacing      = unit(1.5, "lines")
+  ) +
+  labs(x = "Coefficient estimate (95% CI)", y = NULL)
+
+ggsave("coef_plot_exact.pdf", width = 11, height = 5, device = "pdf")
+```
+
+------------------------------------------------------------------------
+
+## R2 — Leave-One-Country-Out (LOCO)
+
+For each country in the fwmid sample, all country-years belonging to that country are dropped and M4 is re-estimated. Itrack the Gend Rep ratio coefficient and the GBV × Egalitarianism interaction across two windows: **Roll-365** (reference window for Table 1) and **Roll-180** (to check whether the significant GBV main effect at that horizon is driven by a single influential country). A dot plot and summary table are produced so that any influential country can be identified.
+
+```{r loco-setup}
+library(purrr)
+library(ggplot2)
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+run_loco <- function(data, formula_str, group_var = "country", track_coefs) {
+  groups <- unique(data[[group_var]])
+  map_dfr(groups, function(g) {
+    d_sub <- data %>% filter(.data[[group_var]] != g)
+    m     <- tryCatch(lmer(as.formula(formula_str), data = d_sub, REML = FALSE),
+                      error = function(e) NULL)
+    if (is.null(m)) return(NULL)
+    fe <- fixef(m); se <- sqrt(diag(vcov(m)))
+    map_dfr(track_coefs, function(tc) {
+      if (!tc %in% names(fe)) return(NULL)
+      tibble(dropped = g, coef = tc, estimate = fe[[tc]], std_error = se[[tc]])
+    })
+  })
+}
+
+# ── Formula strings ───────────────────────────────────────────────────────────
+# Roll-365 — reference window for Table 1
+f_r365 <- paste("activism_high_final ~ gbv_ratio_fwmid_roll365_z * gender_norms_z +",
+                ctrl_indiv, "+", ctrl_macro, "+",
+                "log_non_gbv_st_fwmid_roll365_z + I(log_non_gbv_st_fwmid_roll365_z^2) + log_gen_prot_fwmid_roll365_z +",
+                time_c_fw, "+", re)
+track_r365 <- c("gbv_ratio_fwmid_roll365_z",
+                "gbv_ratio_fwmid_roll365_z:gender_norms_z")
+
+# Roll-180 — shortest window, significant GBV main effect; check for country influence
+f_r180 <- paste("activism_high_final ~ gbv_ratio_fwmid_roll180_z * gender_norms_z +",
+                ctrl_indiv, "+", ctrl_macro, "+",
+                "log_non_gbv_st_fwmid_roll180_z + I(log_non_gbv_st_fwmid_roll180_z^2) + log_gen_prot_fwmid_roll180_z +",
+                time_c_fw, "+", re)
+track_r180 <- c("gbv_ratio_fwmid_roll180_z",
+                "gbv_ratio_fwmid_roll180_z:gender_norms_z")
+
+cat("LOCO setup complete. Running Roll-365 and Roll-180...\n")
+```
+
+```{r loco-run, cache=TRUE}
+loco_r365 <- run_loco(fwmid_data, f_r365, track_coefs = track_r365) %>%
+  mutate(window = "Roll-365")
+loco_r180 <- run_loco(fwmid_data, f_r180, track_coefs = track_r180) %>%
+  mutate(window = "Roll-180")
+
+loco_all <- bind_rows(loco_r365, loco_r180) %>%
+  mutate(
+    coef_label = case_when(
+      str_detect(coef, "gender_norms") ~ "Gend. Repression × Egalitarianism",
+      TRUE                             ~ "Gend. Repression (main effect)"
+    ),
+    ci_lo = estimate - 1.96 * std_error,
+    ci_hi = estimate + 1.96 * std_error
+  )
+
+cat("LOCO complete:", nrow(loco_all), "rows\n")
+```
+
+```{r loco-table, message=FALSE, warning=FALSE}
+# ── Full LOCO table ───────────────────────────────────────────────────────────
+ref_r365_gbv <- fixef(models_fwmid[["activism_high_final_roll365_m4"]])["gbv_ratio_fwmid_roll365_z"]
+ref_r365_int <- fixef(models_fwmid[["activism_high_final_roll365_m4"]])["gbv_ratio_fwmid_roll365_z:gender_norms_z"]
+ref_r180_gbv <- fixef(models_fwmid[["activism_high_final_roll180_m4"]])["gbv_ratio_fwmid_roll180_z"]
+ref_r180_int <- fixef(models_fwmid[["activism_high_final_roll180_m4"]])["gbv_ratio_fwmid_roll180_z:gender_norms_z"]
+
+cat("=== LOCO: fwmid Roll-365 and Roll-180 ===\n")
+cat(sprintf("Full-sample Roll-365 — GBV: %.4f | Interaction: %.4f\n",
+            ref_r365_gbv, ref_r365_int))
+cat(sprintf("Full-sample Roll-180 — GBV: %.4f | Interaction: %.4f\n\n",
+            ref_r180_gbv, ref_r180_int))
+
+loco_all %>%
+  select(dropped, window, coef_label, estimate, std_error) %>%
+  mutate(across(c(estimate, std_error), ~ round(., 4))) %>%
+  arrange(window, coef_label, dropped) %>%
+  print(n = 200)
+```
+
+```{r loco-plot, fig.width=10, fig.height=6, message=FALSE, warning=FALSE}
+library(patchwork)
+
+# ── Roll-180: all countries, top 5 flagged in red, names in caption ───────────
+loco_r180_raw <- loco_all %>% filter(window == "Roll-180")
+
+make_loco_panel_clean <- function(data, coef_lbl, ref_val, panel_title) {
+  d <- data %>% filter(coef_label == coef_lbl)
+
+  top5 <- d %>%
+    mutate(delta = abs(estimate - ref_val)) %>%
+    slice_max(delta, n = 5) %>%
+    pull(dropped)
+
+  d <- d %>%
+    mutate(
+      dropped = factor(dropped, levels = arrange(d, estimate)$dropped),
+      label   = if_else(dropped %in% top5, as.character(dropped), NA_character_)
+    )
+
+  ggplot(d, aes(x = estimate, y = dropped)) +
+    geom_vline(xintercept = 0,       linetype = "dotted", colour = "black",   linewidth = 0.9) +
+    geom_vline(xintercept = ref_val, linetype = "dotted", colour = "#E41A1C", linewidth = 0.9) +
+    geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi),
+                    colour = "grey40", linewidth = 0.4, size = 0.35) +
+    geom_point(data = ~ filter(., !is.na(label)),
+               colour = "#E41A1C", size = 2.2) +
+    labs(title = panel_title,
+         x = "Coefficient estimate (95% CI)", y = NULL) +
+    theme_minimal(base_family = "serif", base_size = 12) +
+    theme(
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.y = element_blank(),
+      plot.title         = element_text(size = 12, face = "bold", margin = margin(b = 6)),
+      axis.text.y        = element_blank(),
+      axis.ticks.y       = element_blank(),
+      axis.text.x        = element_text(size = 10),
+      axis.title.x       = element_text(size = 10, margin = margin(t = 8))
+    )
+}
+
+# ── Top-5 country names for caption ──────────────────────────────────────────
+top5_gbv <- loco_r180_raw %>%
+  filter(coef_label == "Gend. Repression (main effect)") %>%
+  mutate(delta = abs(estimate - ref_r180_gbv)) %>%
+  slice_max(delta, n = 5) %>%
+  arrange(desc(delta)) %>%
+  pull(dropped)
+
+top5_int <- loco_r180_raw %>%
+  filter(coef_label == "Gend. Repression × Egalitarianism") %>%
+  mutate(delta = abs(estimate - ref_r180_int)) %>%
+  slice_max(delta, n = 5) %>%
+  arrange(desc(delta)) %>%
+  pull(dropped)
+
+caption_txt <- paste0(
+  "Red dotted line = full-sample estimate (Roll-180, M4). ",
+  "Red dots = 5 most influential countries.\n",
+  "Gend. Repression: ", paste(top5_gbv, collapse = ", "), ". ",
+  "Interaction: ",      paste(top5_int, collapse = ", "), "."
+)
+
+# ── Build and display ─────────────────────────────────────────────────────────
+p_gbv <- make_loco_panel_clean(loco_r180_raw,
+                                "Gend. Repression (main effect)",
+                                ref_r180_gbv,
+                                "Gendered Repression Ratio")
+
+p_int <- make_loco_panel_clean(loco_r180_raw,
+                                "Gend. Repression × Egalitarianism",
+                                ref_r180_int,
+                                "Gendered Repression × Egalitarianism")
+
+p_gbv + p_int +
+  plot_annotation(
+  #  caption = caption_txt,
+    theme   = theme(plot.caption = element_text(size = 8, family = "serif",
+                                                colour = "grey30", hjust = 0))
+  )
+
+ggsave("figures/loco_plot.pdf", width = 10, height = 6, device = "pdf")
+```
+
+------------------------------------------------------------------------
+
+# Reviewer Materials: Low-Risk Mobilisation (Petitions + Boycotts)
+
+Low-risk mobilisation is defined as the Kwak-weighted score over petitions and boycotts. It correlates r = 0.97 with high-risk mobilisation; the two-factor CFA is statistically preferred but results are substantively near-identical across both outcomes. Only the structural ambient (fieldwork-midpoint) strategy is presented here, on the common 61-CY sample (roll-730 restriction), for direct comparability with the main high-risk results.
+
+```{r reviewer-low-models, cache=TRUE, message=FALSE, warning=FALSE}
+# ── Fit low-risk M4 models — fwmid, common 61-CY sample ──────────────────────
+models_low_fwmid <- list()
+for (w in windows) {
+  gv      <- paste0("gbv_ratio_fwmid_", w, "_z")
+  gv_w    <- paste0("log_non_gbv_st_fwmid_", w, "_z + I(log_non_gbv_st_fwmid_", w, "_z^2) + log_gen_prot_fwmid_", w, "_z")
+  ctrl_cy <- paste(ctrl_macro, "+", gv_w, "+", time_c_fw)
+
+  f4      <- paste("activism_low_final ~", gv, "* gender_norms_z +",
+                   ctrl_indiv, "+", ctrl_cy, "+", re)
+  m4_vars  <- c("activism_low_final",
+                all.vars(as.formula(paste("~", gv, "* gender_norms_z +",
+                                          ctrl_indiv, "+", ctrl_cy))))
+  data_bal <- cy_r730[complete.cases(
+    cy_r730[, intersect(m4_vars, names(cy_r730))]), ]
+
+  models_low_fwmid[[paste0("low_", w, "_m4")]] <-
+    lmer(as.formula(f4), data = data_bal, REML = FALSE)
+}
+
+cat("Low-risk fwmid models fitted:", length(models_low_fwmid), "\n")
+```
+
+## Reviewer Table R1: Low-Risk — All Windows, Structural Ambient (M4, 61 CYs)
+
+```{r reviewer-app-low-fwmid, message=FALSE, warning=FALSE}
+rev_low_fwmid <- lapply(windows, function(w) models_low_fwmid[[paste0("low_", w, "_m4")]])
+names(rev_low_fwmid) <- win_label
+
+modelsummary(
+  rev_low_fwmid,
+  coef_map = coef_map_fwmid_all,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = gof_custom,
+  title    = "Reviewer Table R1: Low-risk mobilisation — Structural ambient, all windows, common sample (61 CYs, M4)"
+)
+```
+
+------------------------------------------------------------------------
+
+# DiD: Quasi-Random GBV Events During Fieldwork
+
+The DiD strategy exploits within-survey temporal variation. Treatment is defined as the *first* women-directed violent event recorded during a country-year's fieldwork window. Respondents interviewed after that date are "post-event"; those before are "pre-event". Country-years with no event during fieldwork serve as controls.
+
+The identifying assumption is that the exact timing of the first in-fieldwork women directed violence event is plausibly exogenous — not predictable by respondents or driven by pre-existing mobilisation trends. This is probed via the parallel trends check and the diagnostic checks below.
+
+## DiD Setup
+
+```{r did-setup, cache=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(lme4)
+
+# ── Step 1: Fieldwork windows for the exact-date sample ──────────────────────
+# DiD requires individual interview dates → use exact_data (N ≈ 57 CY).
+fw_windows_did <- exact_data %>%
+  distinct(country, year, start_fw, end_fw) %>%
+  filter(!is.na(start_fw), !is.na(end_fw))
+
+# ── Step 2: First GBV event per CY during fieldwork ──────────────────────────
+# Only CYs where ≥ 1 state-GBV event falls within [start_fw, end_fw].
+# The date of the FIRST event is the treatment cutoff.
+first_gbv_fw <- fw_windows_did %>%
+  left_join(
+    acled_gbv_state %>%
+      mutate(event_date = as.Date(event_date)) %>%
+      select(country, event_date),
+    by = "country",
+    relationship = "many-to-many"
+  ) %>%
+  filter(event_date >= start_fw, event_date <= end_fw) %>%
+  group_by(country, year) %>%
+  summarise(first_gbv_date = min(event_date), .groups = "drop")
+
+cat("CYs with ≥1 GBV event during fieldwork (treated):", nrow(first_gbv_fw), "\n")
+cat("CYs with zero GBV events (controls):             ",
+    nrow(fw_windows_did) - nrow(first_gbv_fw), "\n")
+
+# ── Step 3: Build DiD variables at respondent level ──────────────────────────
+# gbv_during_fw : 1 if the CY had any GBV event during fieldwork, else 0
+# post_event    : 1 if respondent interviewed AFTER first GBV event; always 0
+#                 for control CYs (no cutoff date)
+did_data <- exact_data %>%
+  left_join(first_gbv_fw, by = c("country", "year")) %>%
+  mutate(
+    gbv_during_fw = as.integer(!is.na(first_gbv_date)),
+    post_event    = as.integer(!is.na(first_gbv_date) & date_interview > first_gbv_date)
+  )
+
+# ── Step 4: Balance check — pre/post cell sizes within treated CYs ───────────
+# CYs with too few pre- or post-event respondents yield unstable estimates.
+cat("\nPre / post respondent counts within each treated CY:\n")
+did_data %>%
+  filter(gbv_during_fw == 1) %>%
+  count(country, year, post_event) %>%
+  pivot_wider(names_from = post_event, values_from = n,
+              values_fill = 0, names_prefix = "n_") %>%
+  print()
+
+# ── Step 5: Retain treated CYs with ≥ 30 pre AND ≥ 30 post respondents ───────
+# All control CYs are kept regardless.
+# Threshold of 30 is conservative but ensures stable within-cell estimates.
+valid_treated_cy <- did_data %>%
+  filter(gbv_during_fw == 1) %>%
+  count(country, year, post_event) %>%
+  pivot_wider(names_from = post_event, values_from = n,
+              values_fill = 0, names_prefix = "n_") %>%
+  filter(n_0 >= 30, n_1 >= 30) %>%
+  select(country, year)
+
+cat("\nTreated CYs passing balance filter (n_pre ≥ 30 & n_post ≥ 30):\n")
+print(valid_treated_cy)
+
+did_data_filtered <- did_data %>%
+  filter(
+    gbv_during_fw == 0 |
+    paste(country, year) %in% paste(valid_treated_cy$country, valid_treated_cy$year)
+  )
+
+# ── Step 6: Background violence / protest controls ────────────────────────────
+# Window: [start_fw − 365, start_fw) — the 12 months BEFORE fieldwork begins.
+
+# Anchoring at fieldwork START (not fwmid, not interview date) is the most conservative choice for a DiD design:
+#   - Completely pre-treatment by construction: no in-fieldwork GBV event can fall inside this window, regardless of when during fieldwork it occurs.
+#   - fwmid anchor would be contaminated if the GBV event falls in the first half of fieldwork; interview-date anchor varies by respondent and directly overlaps with the post-event period.
+#   - CY-level constant: same value for all respondents in the same CY.
+#   - Available for ALL CYs (treated and control alike) — no NA or zero-fill.
+#   - 365-day window chosen over 180 days because these are structural ambient controls, not the focal short-term salience measure.
+
+gen_violence_pre <- fw_windows_did %>%
+  left_join(
+    acled_non_gbv_violence %>%
+      mutate(event_date = as.Date(event_date)) %>%
+      select(country, event_date),
+    by = "country", relationship = "many-to-many"
+  ) %>%
+  filter(event_date >= (start_fw - 365), event_date < start_fw) %>%
+  group_by(country, year) %>%
+  summarise(n_gen_violence_pre = n(), .groups = "drop") %>%
+  mutate(log_gen_violence_pre_z = as.numeric(scale(log(n_gen_violence_pre + 1))))
+
+gen_protest_pre <- fw_windows_did %>%
+  left_join(
+    acled_non_fem_protests %>%
+      mutate(event_date = as.Date(event_date)) %>%
+      select(country, event_date),
+    by = "country", relationship = "many-to-many"
+  ) %>%
+  filter(event_date >= (start_fw - 365), event_date < start_fw) %>%
+  group_by(country, year) %>%
+  summarise(n_gen_protest_pre = n(), .groups = "drop") %>%
+  mutate(log_gen_protest_pre_z = as.numeric(scale(log(n_gen_protest_pre + 1))))
+
+did_data_filtered <- did_data_filtered %>%
+  left_join(gen_violence_pre, by = c("country", "year")) %>%
+  left_join(gen_protest_pre,  by = c("country", "year")) %>%
+  mutate(
+    log_gen_violence_pre_z = replace_na(log_gen_violence_pre_z, 0),
+    log_gen_protest_pre_z  = replace_na(log_gen_protest_pre_z,  0)
+  )
+
+cat("\nFinal DiD sample summary:\n")
+cat("  Total respondents    :", nrow(did_data_filtered), "\n")
+cat("  Treated — post-event :", sum(did_data_filtered$post_event == 1, na.rm = TRUE), "\n")
+cat("  Treated — pre-event  :", sum(did_data_filtered$gbv_during_fw == 1 &
+                                     did_data_filtered$post_event == 0, na.rm = TRUE), "\n")
+cat("  Control              :", sum(did_data_filtered$gbv_during_fw == 0, na.rm = TRUE), "\n")
+```
+
+## DiD Models
+
+```{r did-models, cache=TRUE, message=FALSE, warning=FALSE}
+# ── Timing controls ────────────────────────────────────────────────────────────
+# days_since_fw_start_z  : respondent's position within the fieldwork window
+# fieldwork_days_z       : total length of the fieldwork window
+# log_gen_violence_pre_z : general violence in [start_fw − 365, start_fw)
+# log_gen_protest_pre_z  : general protest  in [start_fw − 365, start_fw)
+
+# Background controls use a 365-day window ending at fieldwork START — fully
+# pre-treatment, CY-level constant, same for treated and control CYs.
+# See Step 6 in did-setup for full rationale.
+time_did <- paste(
+  "fieldwork_days_z + days_since_fw_start_z +",
+  "log_gen_violence_pre_z + log_gen_protest_pre_z"
+)
+
+# ── Model 1 & 2: DiD baseline ─────────────────────────────────────────────────
+# Does being interviewed after the first in-fieldwork GBV event increase high-risk mobilisation, net of individual and macro controls?
+f_did_base <- paste(
+  "activism_high_final ~ post_event +",
+  ctrl_indiv, "+", ctrl_macro, "+",
+  time_did,   "+", re
+)
+
+# ── Model 3 & 4: DiD × egalitarianism ────────────────────────────────────────
+# Does gender norm context moderate the post-event mobilisation response?
+# Key coefficient: post_event:gender_norms_z
+# Note: gbv_during_fw is CY-constant and absorbed by (1 | country:year).
+f_did_triple <- paste(
+  "activism_high_final ~ post_event * gender_norms_z +",
+  ctrl_indiv, "+", ctrl_macro, "+",
+  time_did,   "+", re
+)
+
+# ── Data without Uzbekistan 2022 ──────────────────────────────────────────────
+# Uzbekistan is the single most influential treated CY in the baseline model.
+# I re-estimate without it to assess sensitivity.
+data_no_uzbek <- did_data_filtered %>%
+  filter(!(country == "Uzbekistan" & year == 2022))
+
+# ── Estimate all four models ──────────────────────────────────────────────────
+m_did_base            <- lmer(as.formula(f_did_base),   data = did_data_filtered, REML = FALSE)
+m_did_base_no_uzbek   <- lmer(as.formula(f_did_base),   data = data_no_uzbek,     REML = FALSE)
+m_did_triple          <- lmer(as.formula(f_did_triple), data = did_data_filtered, REML = FALSE)
+m_did_triple_no_uzbek <- lmer(as.formula(f_did_triple), data = data_no_uzbek,     REML = FALSE)
+
+```
+
+## Results Table
+
+```{r did-table, message=FALSE, warning=FALSE}
+# ── Coefficient map ────────────────────────────────────────────────────────────
+did_cm <- c(
+  "post_event"                = "Post-Event",
+  "gender_norms_z"            = "Egalitarianism (z)",
+  "post_event:gender_norms_z" = "Post-Event × Egalitarianism",
+  "age"                       = "Age",
+  "I(age^2)"                  = "Age²",
+  "edu_recodedmiddle"         = "Education: middle",
+  "edu_recodedupper"          = "Education: upper",
+  "income"                    = "Income",
+  "marital_status_binary"     = "Married",
+  "employment_status_binary"  = "Employed",
+  "freexp_altinf_z"           = "Freedom of Expression (z)",
+  "log_gdp_capita_lag_z"      = "Log GDP p.c. (lag, z)",
+  "log_misery_lag_z"          = "Misery Index (lag, z)",
+  "growth_lag_z"              = "GDP Growth (lag, z)",
+  "cso_repression_z"          = "CSO Repression (z)",
+  "fieldwork_days_z"                   = "Fieldwork Duration (z)",
+  "days_since_fw_start_z"              = "Days since FW Start (z)",
+  "log_gen_violence_pre_z"             = "General Violence, pre-FW 365d (z)",
+  "log_gen_protest_pre_z"              = "General Protest, pre-FW 365d (z)"
+)
+
+modelsummary(
+  list(
+    "Baseline"          = m_did_base,
+    "Baseline (−UZB)"   = m_did_base_no_uzbek,
+    "× Egalitarianism"  = m_did_triple,
+    "× Egal. (−UZB)"    = m_did_triple_no_uzbek
+  ),
+  coef_map = did_cm,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = gof_custom,
+  title    = "DiD: High-Risk Mobilisation and In-Fieldwork GBV Events (Exact-Date Sample)"
+  #output = "tex_tables/did_results.tex"
+)
+```
+
+## Parallel Trends Plot
+
+```{r did-parallel-trends, fig.width=10, fig.height=6, message=FALSE, warning=FALSE}
+# ── Rationale ─────────────────────────────────────────────────────────────────
+# If the parallel trends assumption holds, the Control and Treated-pre-event
+# lines should track each other across fieldwork time before the event.
+# A divergence in the Treated-post-event line is consistent with a treatment effect.
+
+pt_data <- did_data_filtered %>%
+  mutate(
+    group = case_when(
+      gbv_during_fw == 0 ~ "Control (no GBV during FW)",
+      post_event    == 1 ~ "Treated — post-event",
+      post_event    == 0 ~ "Treated — pre-event"
+    ),
+    group = factor(group, levels = c(
+      "Control (no GBV during FW)",
+      "Treated — pre-event",
+      "Treated — post-event"
+    ))
+  )
+
+pt_colours <- c(
+  "Control (no GBV during FW)" = "grey50",
+  "Treated — pre-event"        = "#2b8cbe",
+  "Treated — post-event"       = "#D94111"
+)
+
+ggplot(pt_data,
+       aes(x = days_since_fw_start_z, y = activism_high_final,
+           colour = group, fill = group)) +
+  geom_smooth(method = "loess", se = TRUE, linewidth = 0.9, alpha = 0.12) +
+  scale_colour_manual(values = pt_colours, name = NULL) +
+  scale_fill_manual(values   = pt_colours, name = NULL) +
+  labs(
+    title    = "Parallel Trends Check",
+    subtitle = "Smoothed mean mobilisation over fieldwork; treated CYs split at first GBV event",
+    x        = "Days since fieldwork start (z-scored)",
+    y        = "High-risk mobilisation"
+  ) +
+  theme_minimal(base_family = "serif", base_size = 13) +
+  theme(
+    legend.position  = "bottom",
+    panel.grid.minor = element_blank(),
+    plot.title       = element_text(size = 14, face = "bold"),
+    plot.subtitle    = element_text(size = 12, colour = "grey40"),
+    axis.title       = element_text(size = 13),
+    axis.text        = element_text(size = 11)
+  )
+
+ggsave("figures/did_parallel_trends.pdf", width = 10, height = 6, device = "pdf")
+```
+
+## Parallel Trends: Manual Means by Day
+
+```{r did-parallel-manual, message=FALSE, warning=FALSE}
+# ── Mean activism by integer day since fieldwork start, per group ─────────────
+# Prints a wide table: one row per day, columns = Control / Treated-pre / Treated-post
+# Use this to eyeball whether Control and Treated-pre track each other before
+# the event — the key visual test of the parallel trends assumption.
+# Note: only days with ≥ 5 respondents in a group are shown (noisier cells hidden).
+
+parallel_means <- did_data_filtered %>%
+  mutate(
+    day   = as.integer(as.numeric(date_interview - start_fw)),
+    group = case_when(
+      gbv_during_fw == 0 ~ "control",
+      post_event    == 1 ~ "treated_post",
+      post_event    == 0 ~ "treated_pre"
+    )
+  ) %>%
+  filter(!is.na(day), !is.na(activism_high_final)) %>%
+  group_by(day, group) %>%
+  summarise(
+    mean_activism = round(mean(activism_high_final, na.rm = TRUE), 3),
+    n             = n(),
+    .groups       = "drop"
+  ) %>%
+  # suppress cells with fewer than 5 obs (too noisy to interpret)
+  filter(n >= 5) %>%
+  select(-n) %>%
+  pivot_wider(names_from = group, values_from = mean_activism) %>%
+  arrange(day) %>%
+  rename(
+    Day              = day,
+    Control          = control,
+    `Treated (pre)`  = treated_pre,
+    `Treated (post)` = treated_post
+  )
+
+print(parallel_means, n = 200)
+```
+
+## Diagnostic Checks
+
+```{r did-diagnostics, message=FALSE, warning=FALSE}
+# ── Check 1: Missing data in key DiD variables ────────────────────────────────
+cat("=== Check 1: Missing data ===\n")
+did_data_filtered %>%
+  summarise(
+    n_miss_post_event    = sum(is.na(post_event)),
+    n_miss_gbv_during_fw = sum(is.na(gbv_during_fw)),
+    n_miss_activism      = sum(is.na(activism_high_final))
+  ) %>%
+  print()
+
+# ── Check 2: Anticipation effects ─────────────────────────────────────────────
+# Did mobilisation start rising in the WEEK BEFORE the event?
+# If yes, post_event may capture anticipation rather than reaction.
+cat("\n=== Check 2: Anticipation (week before event) ===\n")
+did_data_filtered %>%
+  mutate(
+    anticipation = as.integer(
+      gbv_during_fw == 1 &
+      date_interview >= first_gbv_date - 7 &
+      date_interview <  first_gbv_date
+    )
+  ) %>%
+  group_by(anticipation) %>%
+  summarise(n = n(),
+            mean_activism = mean(activism_high_final, na.rm = TRUE),
+            .groups = "drop") %>%
+  print()
+
+# ── Check 3: Effect heterogeneity across treated CYs ─────────────────────────
+# Which country-years drive the average effect? Flags dependence on outliers.
+cat("\n=== Check 3: Effect heterogeneity (treated CYs, top and bottom 3) ===\n")
+heterogeneity <- did_data_filtered %>%
+  filter(gbv_during_fw == 1) %>%
+  group_by(country, year) %>%
+  summarise(
+    n_pre              = sum(post_event == 0, na.rm = TRUE),
+    n_post             = sum(post_event == 1, na.rm = TRUE),
+    mean_pre_activism  = mean(activism_high_final[post_event == 0], na.rm = TRUE),
+    mean_post_activism = mean(activism_high_final[post_event == 1], na.rm = TRUE),
+    effect             = mean_post_activism - mean_pre_activism,
+    .groups            = "drop"
+  ) %>%
+  arrange(effect)
+
+print(bind_rows(head(heterogeneity, 3), tail(heterogeneity, 3)))
+
+# ── Check 4: Sensitivity to balance threshold ─────────────────────────────────
+# How many treated CYs survive at different minimum cell-size thresholds?
+cat("\n=== Check 4: Threshold sensitivity ===\n")
+for (thr in c(10, 20, 30, 50)) {
+  n_cy <- did_data %>%
+    filter(gbv_during_fw == 1) %>%
+    count(country, year, post_event) %>%
+    pivot_wider(names_from = post_event, values_from = n, values_fill = 0) %>%
+    filter(`0` >= thr, `1` >= thr) %>%
+    nrow()
+  cat(sprintf("  Min n ≥ %2d  →  %d treated CYs retained\n", thr, n_cy))
+}
+```
+
+# Diagnostics
+
+```{r}
+# ── ICC: between-CY share of variation in the Gend Rep ratio ─────────────────────
+library(lme4)
+icc_mod <- lmer(gbv_ratio_exact_roll730_z ~ 1 + (1 | country:year),
+                data = cy_r730_exact, REML = TRUE)
+vc      <- as.data.frame(VarCorr(icc_mod))
+icc_val <- vc$vcov[1] / sum(vc$vcov)
+cat("ICC:", round(icc_val, 3), "\n")
+
+# ── Within-CY SD of the Gend Rep ratio (per respondent) ──────────────────────────
+within_sd <- cy_r730_exact %>%
+  group_by(country, year) %>%
+  summarise(
+    sd_r180 = sd(gbv_ratio_exact_roll180_z, na.rm = TRUE),
+    sd_r365 = sd(gbv_ratio_exact_roll365_z, na.rm = TRUE),
+    sd_r730 = sd(gbv_ratio_exact_roll730_z, na.rm = TRUE),
+    n_resp  = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(sd_r730))
+
+print(within_sd, n = Inf)
+
+ggplot(within_sd, aes(x = sd_r180))+
+  geom_density()
+
+# ── CYs where NO women-directed event hit any respondent's window ─────────────
+# Proxy: if all respondents in a CY have count = 0, no event occurred in-window
+# (Requires the raw count variable, not the z-scored one)
+cy_gbv_status <- cy_r730_exact %>%
+  group_by(country, year) %>%
+  summarise(
+    max_gbv_r730 = max(gbv_st_exact_roll730, na.rm = TRUE),
+    max_nongbv   = max(non_gbv_st_exact_roll730, na.rm = TRUE),
+    n_resp       = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    no_women_events  = max_gbv_r730  == 0,
+    no_general_viol  = max_nongbv    == 0
+  )
+
+cat("Total CYs in cy_r730_exact:", nrow(cy_gbv_status), "\n")
+cat("CYs with NO women-directed events (any window):",
+    sum(cy_gbv_status$no_women_events, na.rm = TRUE), "\n")
+cat("CYs with NO general violence (any window):",
+    sum(cy_gbv_status$no_general_viol, na.rm = TRUE), "\n")
+
+fw_events <- cy_r730_exact %>%
+  group_by(country, year) %>%
+  summarise(
+    # SD of raw counts — not z-scored, so numerator and denominator are separate
+    sd_gbv_count    = sd(gbv_st_exact_roll730,     na.rm = TRUE),
+    sd_nongbv_count = sd(non_gbv_st_exact_roll730, na.rm = TRUE),
+    mean_gbv        = mean(gbv_st_exact_roll730,   na.rm = TRUE),
+    n_resp          = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    had_gbv_during_fw    = sd_gbv_count    > 0,
+    had_nongbv_during_fw = sd_nongbv_count > 0
+  )
+
+cat("Total CYs:", nrow(fw_events), "\n")
+cat("CYs with GBV events during fieldwork:    ",
+    sum(fw_events$had_gbv_during_fw,    na.rm = TRUE), "\n")
+cat("CYs with non-GBV events during fieldwork:",
+    sum(fw_events$had_nongbv_during_fw, na.rm = TRUE), "\n")
+
+# Detail table: CYs that had GBV during fieldwork
+fw_events %>%
+  filter(had_gbv_during_fw) %>%
+  arrange(desc(sd_gbv_count)) %>%
+  select(country, year, sd_gbv_count, sd_nongbv_count, mean_gbv, n_resp) %>%
+  print(n = 12)
+
+# Per-CY: interview date range + event count range
+fw_check <- cy_r730_exact %>%
+  group_by(country, year) %>%
+  summarise(
+    fw_start    = min(date_interview, na.rm = TRUE),
+    fw_end      = max(date_interview, na.rm = TRUE),
+    fw_days     = as.numeric(max(date_interview, na.rm = TRUE) -
+                             min(date_interview, na.rm = TRUE)),
+    min_gbv     = min(gbv_st_exact_roll180, na.rm = TRUE),
+    max_gbv     = max(gbv_st_exact_roll180, na.rm = TRUE),
+    mean_gbv    = mean(gbv_st_exact_roll180, na.rm = TRUE),
+    events_during_fw = max_gbv - min_gbv,   # approx: events added to window during fw
+    .groups = "drop"
+  ) %>%
+  arrange(desc(events_during_fw))
+
+# Focus on the two key cases
+fw_check %>% filter(country %in% c("Venezuela", "Uruguay"))
+
+# And the full table for context
+print(fw_check, n = Inf)
+
+fw_check <- cy_r730_exact %>%
+  group_by(country, year) %>%
+  summarise(
+    fw_start         = min(date_interview, na.rm = TRUE),
+    fw_end           = max(date_interview, na.rm = TRUE),
+    fw_days          = as.numeric(max(date_interview, na.rm = TRUE) -
+                                  min(date_interview, na.rm = TRUE)),
+    min_gbv          = min(gbv_st_exact_roll180, na.rm = TRUE),
+    max_gbv          = max(gbv_st_exact_roll180, na.rm = TRUE),
+    mean_gbv         = mean(gbv_st_exact_roll180, na.rm = TRUE),
+    events_during_fw = max_gbv - min_gbv,
+    min_nongbv       = min(non_gbv_st_exact_roll180, na.rm = TRUE),
+    max_nongbv       = max(non_gbv_st_exact_roll180, na.rm = TRUE),
+    nongbv_during_fw = max_nongbv - min_nongbv,
+    .groups = "drop"
+  )
+
+cat("CYs with GBV during fieldwork (Roll-180):",
+    sum(fw_check$events_during_fw > 0), "\n")
+cat("CYs with NO GBV during fieldwork (Roll-180):",
+    sum(fw_check$events_during_fw == 0), "\n")
+cat("CYs with non-GBV violence during fieldwork (Roll-180):",
+    sum(fw_check$nongbv_during_fw > 0), "\n")
+cat("CYs with NO non-GBV violence during fieldwork (Roll-180):",
+    sum(fw_check$nongbv_during_fw == 0), "\n")
+```
+
+
+------------------------------------------------------------------------
+
+# Robustness: Interview Privacy (S013B)
+
+This section checks whether the presence of third parties during the WVS interview confounds the main results. S013B was not administered in 18 of 72 country-years (concentrated in African CYs and early waves), so this check runs on the restricted subsample where coverage exists. Results are compared across structural ambient (fwmid) and interview-date-anchored (exact) strategies for all three rolling windows on the common 61-CY sample.
+
+```{r privacy-join, message=FALSE, warning=FALSE}
+# ── Build privacy lookup from wvs_raw (already in memory) ────────────────────
+privacy_lookup <- wvs_raw %>%
+  transmute(
+    respondent_id     = as.numeric(S007),
+    interview_privacy = case_when(
+      S013B == 1 ~ 1,
+      S013B == 2 ~ 0,
+      TRUE       ~ NA_real_
+    )
+  )
+
+# Patch all analytical datasets in memory
+fwmid_data <- fwmid_data %>% left_join(privacy_lookup, by = "respondent_id")
+exact_data <- exact_data %>% left_join(privacy_lookup, by = "respondent_id")
+cy_r730    <- cy_r730    %>% left_join(privacy_lookup, by = "respondent_id")
+
+cat("interview_privacy distribution in cy_r730:\n")
+print(table(cy_r730$interview_privacy, useNA = "always"))
+cat("\nCYs with 0% coverage (will be dropped from privacy models):\n")
+cy_r730 %>%
+  group_by(country, year) %>%
+  summarise(pct_valid = mean(!is.na(interview_privacy)), .groups = "drop") %>%
+  filter(pct_valid == 0) %>%
+  print()
+```
+
+```{r privacy-models, cache=TRUE, message=FALSE, warning=FALSE}
+# ── ctrl_indiv extended with interview_privacy ────────────────────────────────
+ctrl_indiv_priv <- paste(ctrl_indiv, "+ interview_privacy")
+
+windows <- c("roll180", "roll365", "roll730")
+
+models_priv_fwmid <- list()
+models_priv_exact <- list()
+
+for (w in windows) {
+  # fwmid
+  gv      <- paste0("gbv_ratio_fwmid_", w, "_z")
+  gv_w    <- paste0("log_non_gbv_st_fwmid_", w, "_z + I(log_non_gbv_st_fwmid_", w, "_z^2) + log_gen_prot_fwmid_", w, "_z")
+  ctrl_cy <- paste(ctrl_macro, "+", gv_w, "+", time_c_fw)
+  f4      <- paste("activism_high_final ~", gv, "* gender_norms_z +",
+                   ctrl_indiv_priv, "+", ctrl_cy, "+", re)
+  m4_vars <- c("activism_high_final",
+               all.vars(as.formula(paste("~", gv, "* gender_norms_z +",
+                                         ctrl_indiv_priv, "+", ctrl_cy))))
+  data_bal <- cy_r730[complete.cases(cy_r730[, intersect(m4_vars, names(cy_r730))]), ]
+  models_priv_fwmid[[w]] <- lmer(as.formula(f4), data = data_bal, REML = FALSE)
+
+  # exact
+  gv_e    <- paste0("gbv_ratio_exact_", w, "_z")
+  gv_w_e  <- paste0("log_non_gbv_st_exact_", w, "_z + I(log_non_gbv_st_exact_", w, "_z^2) + log_gen_prot_exact_", w, "_z")
+  ctrl_cy_e <- paste(ctrl_macro, "+", gv_w_e, "+", time_c)
+  f4_e    <- paste("activism_high_final ~", gv_e, "* gender_norms_z +",
+                   ctrl_indiv_priv, "+", ctrl_cy_e, "+", re)
+  m4_vars_e <- c("activism_high_final",
+                 all.vars(as.formula(paste("~", gv_e, "* gender_norms_z +",
+                                           ctrl_indiv_priv, "+", ctrl_cy_e))))
+  data_bal_e <- cy_r730[complete.cases(cy_r730[, intersect(m4_vars_e, names(cy_r730))]), ]
+  models_priv_exact[[w]] <- lmer(as.formula(f4_e), data = data_bal_e, REML = FALSE)
+}
+
+cat("Privacy-controlled models estimated.\n")
+cat("fwmid CYs:", sapply(models_priv_fwmid, function(m) length(unique(model.frame(m)$`country:year` %||% levels(getME(m, "flist")[[1]])))), "\n")
+```
+
+```{r privacy-table, message=FALSE, warning=FALSE}
+priv_cm <- c(
+  "gbv_ratio_fwmid_roll180_z"                    = "Gend. Repression (Roll-180)",
+  "gbv_ratio_fwmid_roll365_z"                    = "Gend. Repression (Roll-365)",
+  "gbv_ratio_fwmid_roll730_z"                    = "Gend. Repression (Roll-730)",
+  "gbv_ratio_exact_roll180_z"                    = "Gend. Repression (Roll-180)",
+  "gbv_ratio_exact_roll365_z"                    = "Gend. Repression (Roll-365)",
+  "gbv_ratio_exact_roll730_z"                    = "Gend. Repression (Roll-730)",
+  "gender_norms_z"                               = "Egalitarianism (z)",
+  "gbv_ratio_fwmid_roll180_z:gender_norms_z"     = "Gend. Repression × Egalitarianism",
+  "gbv_ratio_fwmid_roll365_z:gender_norms_z"     = "Gend. Repression × Egalitarianism",
+  "gbv_ratio_fwmid_roll730_z:gender_norms_z"     = "Gend. Repression × Egalitarianism",
+  "gbv_ratio_exact_roll180_z:gender_norms_z"     = "Gend. Repression × Egalitarianism",
+  "gbv_ratio_exact_roll365_z:gender_norms_z"     = "Gend. Repression × Egalitarianism",
+  "gbv_ratio_exact_roll730_z:gender_norms_z"     = "Gend. Repression × Egalitarianism",
+  "interview_privacy"                            = "Interview Privacy (1=private)"
+)
+
+modelsummary(
+  list(
+    "fwmid R-180" = models_priv_fwmid[["roll180"]],
+    "fwmid R-365" = models_priv_fwmid[["roll365"]],
+    "fwmid R-730" = models_priv_fwmid[["roll730"]],
+    "exact R-180"  = models_priv_exact[["roll180"]],
+    "exact R-365"  = models_priv_exact[["roll365"]],
+    "exact R-730"  = models_priv_exact[["roll730"]]
+  ),
+  coef_map = priv_cm,
+  stars    = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = gof_custom,
+  title    = "Robustness: Interview Privacy Control — M4, all windows, restricted sample"
+)
+```
+
+------------------------------------------------------------------------
+
+# Robustness: Individual-Level Egalitarianism
+
+This section checks whether substituting individual-level gender attitudes for country-year mean egalitarianism changes the substantive results. The theoretical expectation is that societal normative context — not individual attitudes — drives the moderation; this check verifies that different things do not happen when the level of aggregation changes. I run it for all three designs (fwmid, exact, DiD) and compare side-by-side with the original CY-mean specifications.
+
+## Setup
+
+```{r indiv-norms-setup, message=FALSE, warning=FALSE}
+# ── Create standardised individual-level norms in each analytical dataset ─────
+# gender_norms_index_raw = mean(C001_norm, D059_norm) for each respondent
+# Standardised globally so scale matches gender_norms_z
+
+fwmid_data        <- fwmid_data        %>% mutate(gender_norms_indiv_z = as.numeric(scale(gender_norms_index_raw)))
+exact_data        <- exact_data        %>% mutate(gender_norms_indiv_z = as.numeric(scale(gender_norms_index_raw)))
+did_data_filtered <- did_data_filtered %>% mutate(gender_norms_indiv_z = as.numeric(scale(gender_norms_index_raw)))
+
+# ── Correlation: individual vs CY-mean norms ──────────────────────────────────
+# Expect moderate positive correlation: individual scores cluster within CYs
+# but vary substantially within them too
+cat("Correlation — individual vs CY-mean norms:\n")
+cat("  fwmid sample: r =",
+    round(cor(fwmid_data$gender_norms_indiv_z,
+              fwmid_data$gender_norms_z, use = "complete.obs"), 3), "\n")
+cat("  exact sample: r =",
+    round(cor(exact_data$gender_norms_indiv_z,
+              exact_data$gender_norms_z, use = "complete.obs"), 3), "\n")
+```
+
+## Models
+
+```{r indiv-norms-models, cache=TRUE, message=FALSE, warning=FALSE}
+# ── Structural ambient: fwmid, Roll-180, M4 ───────────────────────────────────
+m_indiv_fwmid <- lmer(
+  as.formula(paste(
+    "activism_high_final ~ gbv_ratio_fwmid_roll180_z * gender_norms_indiv_z +",
+    ctrl_indiv, "+", ctrl_macro, "+",
+    "log_non_gbv_st_fwmid_roll180_z + I(log_non_gbv_st_fwmid_roll180_z^2) + log_gen_prot_fwmid_roll180_z +",
+    time_c_fw, "+", re
+  )),
+  data = fwmid_data, REML = FALSE
+)
+
+# ── Interview-date-anchored: exact, Roll-180, M4 ──────────────────────────────
+m_indiv_exact <- lmer(
+  as.formula(paste(
+    "activism_high_final ~ gbv_ratio_exact_roll180_z * gender_norms_indiv_z +",
+    ctrl_indiv, "+", ctrl_macro, "+",
+    "log_non_gbv_st_exact_roll180_z + log_gen_prot_exact_roll180_z +",
+    time_c, "+", re
+  )),
+  data = exact_data, REML = FALSE
+)
+
+# ── DiD: individual norms as moderator ────────────────────────────────────────
+m_did_indiv <- lmer(
+  as.formula(paste(
+    "activism_high_final ~ post_event * gender_norms_indiv_z +",
+    ctrl_indiv, "+", ctrl_macro, "+",
+    time_did, "+", re
+  )),
+  data = did_data_filtered, REML = FALSE
+)
+
+m_did_indiv_no_uzbek <- lmer(
+  as.formula(paste(
+    "activism_high_final ~ post_event * gender_norms_indiv_z +",
+    ctrl_indiv, "+", ctrl_macro, "+",
+    time_did, "+", re
+  )),
+  data = did_data_filtered %>% filter(!(country == "Uzbekistan" & year == 2022)),
+  REML = FALSE
+)
+
+cat("Individual-norms models estimated.\n")
+```
+
+## Comparison Table
+
+```{r indiv-norms-table, message=FALSE, warning=FALSE}
+# ── Side-by-side: CY-mean (original) vs individual norms ─────────────────────
+# Columns ordered: fwmid pair | exact pair | DiD pair
+indiv_cm <- c(
+  "gbv_ratio_fwmid_roll180_z"                      = "Gend Rep ratio fwmid (z)",
+  "gbv_ratio_exact_roll180_z"                      = "Gend Rep ratio exact (z)",
+  "post_event"                                     = "Post-Event",
+  "gender_norms_z"                                 = "Egalitarianism — CY mean (z)",
+  "gender_norms_indiv_z"                           = "Egalitarianism — Individual (z)",
+  "gbv_ratio_fwmid_roll180_z:gender_norms_z"       = "GBV × Egal. CY",
+  "gbv_ratio_fwmid_roll180_z:gender_norms_indiv_z" = "GBV × Egal. Indiv.",
+  "gbv_ratio_exact_roll180_z:gender_norms_z"       = "GBV × Egal. CY",
+  "gbv_ratio_exact_roll180_z:gender_norms_indiv_z" = "GBV × Egal. Indiv.",
+  "post_event:gender_norms_z"                      = "Post-Event × Egal. CY",
+  "post_event:gender_norms_indiv_z"                = "Post-Event × Egal. Indiv."
+)
+
+modelsummary(
+  list(
+    "fwmid CY"       = models_fwmid[["activism_high_final_roll180_m4"]],
+    "fwmid Indiv."   = m_indiv_fwmid,
+    "Exact CY"       = models_exact[["activism_high_final_roll180_m4"]],
+    "Exact Indiv."   = m_indiv_exact,
+    "DiD CY"         = m_did_triple,
+    "DiD Indiv."     = m_did_indiv
+  ),
+  coef_map = indiv_cm,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = gof_custom,
+  title    = "Individual vs CY-Level Egalitarianism as Moderator — Roll-180, M4"
+)
+```
+
+------------------------------------------------------------------------
+
+# DiD Robustness: Control Group Composition
+
+This section checks whether restricting the DiD control group to country-years that had GBV events *before* fieldwork (rather than all no-event CYs) changes the substantive results — a check that different things do not happen when a more comparable counterfactual is used. Controls with prior GBV share the same conflict dynamics as treated CYs but differ only in event timing relative to fieldwork. I re-estimate the four main DiD models under this restriction and compare side-by-side with the original pooled specification.
+
+```{r did-ctrl-composition, cache=TRUE, message=FALSE, warning=FALSE}
+library(dplyr)
+library(modelsummary)
+
+# ── Step 1: Identify CYs with GBV events in [start_fw − 365, start_fw) ───────
+# These are countries where GBV was "present" in the pre-fieldwork context
+# but the event happened not to fall inside the fieldwork window.
+prior_gbv_cy <- fw_windows_did %>%
+  left_join(
+    acled_gbv_state %>%
+      mutate(event_date = as.Date(event_date)) %>%
+      select(country, event_date),
+    by = "country", relationship = "many-to-many"
+  ) %>%
+  filter(event_date >= (start_fw - 365), event_date < start_fw) %>%
+  group_by(country, year) %>%
+  summarise(n_prior_gbv = n(), .groups = "drop")
+
+cat("CYs with prior GBV (within 365d before FW start):", nrow(prior_gbv_cy), "\n")
+cat("  Of which also treated (in-FW GBV):",
+    sum(paste(prior_gbv_cy$country, prior_gbv_cy$year) %in%
+        paste(valid_treated_cy$country, valid_treated_cy$year)), "\n")
+cat("  Available as restricted controls:",
+    sum(!paste(prior_gbv_cy$country, prior_gbv_cy$year) %in%
+         paste(valid_treated_cy$country, valid_treated_cy$year)), "\n")
+
+# ── Step 2: Build restricted dataset ─────────────────────────────────────────
+# Keep: (a) all treated CYs that passed the balance filter
+#        (b) control CYs that had GBV in the year before fieldwork
+did_data_prior_ctrl <- did_data_filtered %>%
+  filter(
+    gbv_during_fw == 1 |
+    paste(country, year) %in% paste(prior_gbv_cy$country, prior_gbv_cy$year)
+  )
+
+cat("\nPooled control sample  — respondents:", nrow(did_data_filtered),
+    "| CYs:", n_distinct(paste(did_data_filtered$country, did_data_filtered$year)), "\n")
+cat("Prior-GBV control sample — respondents:", nrow(did_data_prior_ctrl),
+    "| CYs:", n_distinct(paste(did_data_prior_ctrl$country, did_data_prior_ctrl$year)), "\n")
+
+# ── Step 3: Re-estimate four models with restricted control group ─────────────
+data_prior_no_uzbek <- did_data_prior_ctrl %>%
+  filter(!(country == "Uzbekistan" & year == 2022))
+
+m_prior_base            <- lmer(as.formula(f_did_base),   data = did_data_prior_ctrl, REML = FALSE)
+m_prior_base_no_uzbek   <- lmer(as.formula(f_did_base),   data = data_prior_no_uzbek, REML = FALSE)
+m_prior_triple          <- lmer(as.formula(f_did_triple), data = did_data_prior_ctrl, REML = FALSE)
+m_prior_triple_no_uzbek <- lmer(as.formula(f_did_triple), data = data_prior_no_uzbek, REML = FALSE)
+
+cat("\nPrior-GBV control models estimated.\n")
+```
+
+```{r did-ctrl-table, message=FALSE, warning=FALSE}
+# ── Comparison table: pooled vs prior-GBV control ────────────────────────────
+# Left four columns = original pooled control (all no-event CYs)
+# Right four columns = restricted to CYs with prior GBV only
+# Key comparison: does Post-Event hold? Does the interaction pattern change?
+
+modelsummary(
+  list(
+    # Pooled control (original)
+    "Base"          = m_did_base,
+    "Base (−UZB)"   = m_did_base_no_uzbek,
+    "× Egal."       = m_did_triple,
+    "× Egal.(−UZB)" = m_did_triple_no_uzbek,
+    # Prior-GBV control (restricted)
+    "Base†"          = m_prior_base,
+    "Base† (−UZB)"   = m_prior_base_no_uzbek,
+    "× Egal.†"       = m_prior_triple,
+    "× Egal.†(−UZB)" = m_prior_triple_no_uzbek
+  ),
+  coef_map = did_cm,
+  stars = c("+" = .1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = gof_custom,
+  title    = "DiD Control Group Sensitivity: Pooled (columns 1–4) vs Prior-GBV Controls Only (columns 5–8, †)"
+)
+```
