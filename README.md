@@ -14,12 +14,12 @@ gendered state violence derived from ACLED and political/economic indicators fro
 
 ## What's in this repository
 
-This repository contains **only the analysis code**, provided as a single Quarto document (`clean_tfm.qmd`):
+This repository contains only the analysis code, provided as a single Quarto document (`clean_tfm.qmd`):
 
-  - full data cleaning
-  - variable construction (Kwak weighting, CFA, exposure windows, anchoring strategies)
-  - model estimation
-  - and figure/table generation for all results reported in the thesis.
+  - Full data cleaning
+  - Variable construction (Kwak weighting, CFA, exposure windows, anchoring strategies)
+  - Model estimation
+  - And figure/table generation for all results reported in the thesis.
 
 **Raw data files are not included** due to size and licensing restrictions. 
 
