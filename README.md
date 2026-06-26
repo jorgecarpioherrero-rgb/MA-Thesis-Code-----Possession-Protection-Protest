@@ -12,9 +12,6 @@ state-perpetrated gendered violence activates male mobilization, and whether soc
 The analysis combines individual-level data from the World Values Survey (WVS) with country-year measures of 
 gendered state violence derived from ACLED and political/economic indicators from V-Dem and the World Bank/IMF.
 
-Two identification strategies are used: a midpoint-fieldwork-anchored strategy (primary) and 
-an interview-date-anchored strategy (robustness).
-
 ## What's in this repository
 
 This repository contains **only the analysis code**, provided as a single Quarto document (`clean_tfm.qmd`):
