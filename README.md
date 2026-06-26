@@ -1,8 +1,8 @@
 # Possession, Protection, Protest
 **State-Gendered Violence and Male Mobilization: The Moderating Role of Social Gender Expectations?**
 
-MA thesis, Social Sciences, UC3M (Universidad Carlos III de Madrid)
-Author: Jorge Carpio Herrero
+MA thesis, Social Sciences, UC3M (Universidad Carlos III de Madrid).
+Author: Jorge Carpio Herrero.
 Supervisor: Prof. Juan Jesús Fernández González
 
 ## Overview
