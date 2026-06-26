@@ -1,5 +1,5 @@
 # Possession, Protection, Protest
-**State-Gendered Violence and Male Mobilization under Varying Social Gender Expectations**
+**State-Gendered Violence and Male Mobilization: The Moderating Role of Social Gender Expectations?**
 
 MA thesis, Social Sciences, UC3M (Universidad Carlos III de Madrid)
 Author: Jorge Carpio Herrero
@@ -56,7 +56,7 @@ before downloading it from the web.
 
 If you use this code, please cite:
 
-> Carpio Herrero, J. (2026). *Possession, Protection, Protest: State-Gendered Violence and Male Mobilization under Varying Social Gender Expectations*. MA Thesis, Universidad Carlos III de Madrid.
+> Carpio Herrero, J. (2026). *Possession, Protection, Protest: State-Gendered Violence and Male Mobilization: The Moderating Role of Social Gender Expectations?*. MA Thesis, Universidad Carlos III de Madrid.
 
 ## Contact
 
