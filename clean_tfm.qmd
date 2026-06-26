@@ -22,7 +22,7 @@ library(vdemdata)
 library(psych)
 library(purrr)
 
-setwd("/Users/rafaelcarpiobailen/Desktop/JORGE/TFM ORDENADO")
+setwd("/write your working directory")
 ```
 
 # Loading Data
@@ -36,7 +36,7 @@ vdem_raw <- vdemdata::vdem
 ## ACLED
 
 ```{r warning = FALSE, echo = FALSE, output = FALSE}
-acled_raw <- read_delim("/Users/rafaelcarpiobailen/Desktop/JORGE/TFM ORDENADO/acled_raw.csv", 
+acled_raw <- read_delim("/write your working directory/acled_raw.csv", 
     delim = ";", escape_double = FALSE, trim_ws = TRUE)
 ```
 
@@ -44,7 +44,7 @@ acled_raw <- read_delim("/Users/rafaelcarpiobailen/Desktop/JORGE/TFM ORDENADO/ac
 
 ```{r echo = FALSE, warning = FALSE, output = FALSE}
 wvs_raw <- read_csv(
-  "/Users/rafaelcarpiobailen/Desktop/JORGE/TFM ORDENADO/wvs_data.csv")
+  "/write your working directory/wvs_data.csv")
 ```
 
 # Creating Variables
@@ -348,9 +348,9 @@ wvs <- wvs_raw %>%
     start_fw                = start_fw,
     end_fw                  = end_fw,
     midpoint_fw             = midpoint_fw,
-    date_interview          = date_interview,          # exact only, NA otherwise
-    date_interview_end      = date_interview_end,      # exact; fallback: end_fw
-    date_interview_start    = date_interview_start,    # exact; fallback: start_fw
+    date_interview          = date_interview, # exact only, NA otherwise
+    date_interview_end      = date_interview_end, # exact; fallback: end_fw
+    date_interview_start    = date_interview_start, # exact; fallback: start_fw
     date_interview_midpoint = date_interview_midpoint, # exact; fallback: midpoint_fw
     has_exact_date          = has_exact_date,
 
@@ -383,9 +383,9 @@ wvs <- wvs_raw %>%
       .default = NA_real_),
 
     marital_status = recode(X007,
-      `1` = "married",                 `2` = "living together as married",
-      `3` = "divorced",                `4` = "separated",
-      `5` = "widowed",                 `6` = "single/never married",
+      `1` = "married",  `2` = "living together as married",
+      `3` = "divorced", `4` = "separated",
+      `5` = "widowed",  `6` = "single/never married",
       .default = NA_character_),
 
     marital_status_binary = recode(X007,
@@ -659,7 +659,7 @@ wvs_exposure <- filter(wvs_exposure, country != "Canada")
 
 ```{r}
 saveRDS(wvs_exposure, "wvs_exposure_clean.rds")
-wvs_exposure <- readRDS("wvs_exposure_clean.rds")
+#wvs_exposure <- readRDS("wvs_exposure_clean.rds")
 ```
 
 # Join VDEM and Exclude Puerto Rico
@@ -670,7 +670,7 @@ joint_data <- wvs_exposure %>%
   filter(country != "Puerto Rico")
 
 saveRDS(joint_data, "joint_data_clean.rds")
-joint_data <- readRDS("joint_data_clean.rds")
+#joint_data <- readRDS("joint_data_clean.rds")
 ```
 
 # Joining Economic Data
@@ -902,7 +902,7 @@ joint_data <- joint_data %>%
 
 ```{r}
 saveRDS(joint_data, "joint_data_final_clean.rds")
-joint_data <- readRDS("joint_data_final_clean.rds")
+#joint_data <- readRDS("joint_data_final_clean.rds")
 ```
 
 # Skewness Check (Pre-Transformation)
@@ -1458,7 +1458,7 @@ cat("Country-years covered   :",
 
 ```{r}
 saveRDS(final_sample_data, "final_sample_data_clean.rds")
-final_sample_data <- readRDS("final_sample_data_clean.rds")
+#final_sample_data <- readRDS("final_sample_data_clean.rds")
 ```
 
 ------------------------------------------------------------------------
@@ -2747,7 +2747,7 @@ ggsave("figures/combined_ame_pred_roll180_final.pdf", p_combined_final, width = 
 library(broom.mixed)
 
 windows_key <- c("roll180", "roll365", "roll730")
-windows_lab <- c("Roll-180", "Roll-365", "Roll-730 (primary)")
+windows_lab <- c("Roll-180", "Roll-365", "Roll-730")
 
 # ── Extract Gend Rep ratio and GBV×Norms from all M4 models ───────────────────────
 extract_coefs <- function(model_list, strategy, dv_name, dv_label) {
