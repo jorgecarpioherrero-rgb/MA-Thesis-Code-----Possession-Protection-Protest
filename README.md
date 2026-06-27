@@ -36,7 +36,7 @@ To reproduce the analysis, download the following datasets and place them in a l
 | IMF Data Mapper (GDP, inflation) | [imf.org/external/datamapper](https://www.imf.org/external/datamapper/) | Open access |
 
 Exact variable codes, filters, and merging procedures are documented in the Quarto file itself.
-Only the WVS and ACLED packages need downloading, as VDEM and WB data were obtained through R packages.
+Only the WVS and ACLED data sets need downloading, as VDEM and WB data were obtained through R packages.
 To facilitate the data cleaning, ACLED was filtered to exclude battles, explosions, and remote violence 
 before downloading it from the web.
 
